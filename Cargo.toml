@@ -2,7 +2,7 @@
 name = "zizq"
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Official Rust Client for the Zizq Job Queue"
 license = "MIT"
 repository = "https://github.com/zizq-labs/zizq-rust"

@@ -30,6 +30,8 @@ pub enum Format {
 }
 
 impl Format {
+    /// Content type sent on request/response endpoints — `application/json`
+    /// or `application/msgpack`.
     pub(crate) fn content_type(self) -> &'static str {
         match self {
             Format::Json => "application/json",
@@ -37,15 +39,29 @@ impl Format {
         }
     }
 
+    /// Content type sent on the streaming `/jobs/take` endpoint. The
+    /// streaming format is framed differently from the request/response
+    /// body (NDJSON / length-prefixed MessagePack), so it has its own
+    /// content type.
+    pub(crate) fn stream_content_type(self) -> &'static str {
+        match self {
+            Format::Json => "application/x-ndjson",
+            Format::MessagePack => "application/vnd.zizq.msgpack-stream",
+        }
+    }
+
     /// Parse a `Content-Type` header value into a [`Format`], ignoring
     /// any media-type parameters (e.g. `application/json; charset=utf-8`).
-    /// Returns `None` when the type isn't one we recognise — callers
-    /// fall back to the configured format in that case.
+    /// Recognises both the request/response and streaming content types.
+    /// Returns `None` when the type isn't one we know — callers fall
+    /// back to the configured format in that case.
     pub(crate) fn from_content_type(s: &str) -> Option<Self> {
         let mime = s.split(';').next()?.trim();
         match mime {
-            "application/json" => Some(Format::Json),
-            "application/msgpack" => Some(Format::MessagePack),
+            "application/json" | "application/x-ndjson" => Some(Format::Json),
+            "application/msgpack" | "application/vnd.zizq.msgpack-stream" => {
+                Some(Format::MessagePack)
+            }
             _ => None,
         }
     }
@@ -67,6 +83,22 @@ mod tests {
     fn parses_msgpack_content_type() {
         assert_eq!(
             Format::from_content_type("application/msgpack"),
+            Some(Format::MessagePack),
+        );
+    }
+
+    #[test]
+    fn parses_ndjson_stream_content_type_as_json() {
+        assert_eq!(
+            Format::from_content_type("application/x-ndjson"),
+            Some(Format::Json),
+        );
+    }
+
+    #[test]
+    fn parses_msgpack_stream_content_type_as_msgpack() {
+        assert_eq!(
+            Format::from_content_type("application/vnd.zizq.msgpack-stream"),
             Some(Format::MessagePack),
         );
     }

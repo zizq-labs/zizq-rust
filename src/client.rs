@@ -22,6 +22,7 @@ use crate::failure::FailureBuilder;
 use crate::format::Format;
 use crate::job::JobKind;
 use crate::resources::{BackoffConfig, Job, RetentionConfig};
+use crate::take::{TakeBuilder, TakeStream};
 use crate::unique_key::UniqueScope;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -211,6 +212,40 @@ impl Client {
         FailureBuilder::new(self, id.into(), message.into())
     }
 
+    /// Begin streaming jobs from the server. Returns a [`TakeBuilder`]
+    /// that chains optional filters (`.queues(...)`, `.prefetch(...)`)
+    /// and is awaited to open the connection.
+    ///
+    /// The returned [`TakeStream`] implements
+    /// [`futures_core::Stream`]; iterate via `.next().await` and stop
+    /// by dropping the stream (or via `tokio::select!` for explicit
+    /// cancellation). Heartbeats from the server are filtered out
+    /// transparently and never reach the caller.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use futures_util::TryStreamExt;
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut stream = client
+    ///     .take()
+    ///     .queues(["emails", "urgent"])
+    ///     .prefetch(16)
+    ///     .await?;
+    ///
+    /// // `try_next` returns Result<Option<Job>, ZizqError>; `?`
+    /// // propagates a transport / decode error out of the loop.
+    /// while let Some(job) = stream.try_next().await? {
+    ///     // ... process the job ...
+    ///     client.report_success(&job.id).await?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn take(&self) -> TakeBuilder<'_> {
+        TakeBuilder::new(self)
+    }
+
     /// Submit a resolved enqueue request and return the resulting
     /// [`Job`]. Owns URL construction, body encoding, headers, dispatch,
     /// status handling, and response decoding.
@@ -239,6 +274,58 @@ impl Client {
         let url = self.url(&["jobs", id, "failure"]);
         let response = self.send(reqwest::Method::POST, url, Some(bytes)).await?;
         self.parse_job_response(response).await
+    }
+
+    /// Open the streaming `/jobs/take` connection and return a
+    /// [`TakeStream`] yielding decoded jobs.
+    ///
+    /// Uses the HTTP/1.1 pool so the long-lived stream doesn't share
+    /// a multiplexed HTTP/2 connection with request/response traffic.
+    /// The framing decoder is picked from the server's `Content-Type`
+    /// (not the requested format).
+    pub(crate) async fn take_raw(
+        &self,
+        queues: Vec<String>,
+        prefetch: Option<u32>,
+    ) -> Result<TakeStream, ZizqError> {
+        let mut url = self.url(&["jobs", "take"]);
+        // Only touch query_pairs_mut when we have params to add;
+        // calling it unconditionally leaves a trailing `?` on the URL
+        // even when no pairs are appended.
+        if !queues.is_empty() || prefetch.is_some() {
+            let mut q = url.query_pairs_mut();
+            for queue in &queues {
+                q.append_pair("queues", queue);
+            }
+            if let Some(p) = prefetch {
+                q.append_pair("prefetch", &p.to_string());
+            }
+        }
+
+        let response = self
+            .inner
+            .http1
+            .get(url)
+            .header(
+                reqwest::header::ACCEPT,
+                self.inner.format.stream_content_type(),
+            )
+            .send()
+            .await?;
+
+        let status = response.status();
+        let format = self.response_format(&response);
+
+        if !status.is_success() {
+            let body_bytes = response.bytes().await?;
+            let message = extract_error_message(&body_bytes, format);
+            return Err(ZizqError::Response {
+                status: status.as_u16(),
+                message,
+            });
+        }
+
+        Ok(TakeStream::new(Box::pin(response.bytes_stream()), format))
     }
 
     /// Build an absolute URL by appending the given path segments to
@@ -429,12 +516,25 @@ impl ClientBuilder {
             .read_timeout(read_timeout)
             .build()?;
 
+        // HTTP/1.1 pool for the long-lived take stream. We force HTTP/1.1
+        // with `http1_only()` rather than relying on the default — over
+        // TLS, ALPN would otherwise upgrade us to HTTP/2, which adds
+        // framing overhead that we've measured as a net negative on a
+        // single long-lived stream. Liveness knobs match http2.
+        let http1 = reqwest::Client::builder()
+            .http1_only()
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
+            .connect_timeout(connect_timeout)
+            .read_timeout(read_timeout)
+            .build()?;
+
         Ok(Client {
             inner: Arc::new(Inner {
                 base_url,
                 format: self.format.unwrap_or_default(),
                 http2,
-                http1: None,
+                http1,
             }),
         })
     }
@@ -448,17 +548,16 @@ pub(crate) struct Inner {
     /// Whether or not we're using Json or MessagePack.
     pub(crate) format: Format,
 
-    /// Persistent multiplexing HTTP/2 client.
-    /// Supports h2c so HTTP/2 can be used without TLS.
+    /// Persistent multiplexing HTTP/2 client used for request/response
+    /// endpoints (enqueue, success, failure, etc). Supports h2c so
+    /// HTTP/2 can be used without TLS.
     pub(crate) http2: reqwest::Client,
 
-    // Placeholder for a separate HTTP/1.1 pool, used later by the
-    // streaming /jobs/take endpoint. When wired up it will share the
-    // same connect_timeout / read_timeout / tcp_keepalive values as
-    // http2 — read_timeout is the idle-detection knob for the
-    // long-lived stream, kept fresh by the server's heartbeats.
-    #[allow(dead_code)]
-    pub(crate) http1: Option<reqwest::Client>,
+    /// Separate HTTP/1.1 client used for the long-lived `/jobs/take`
+    /// streaming endpoint. Sharing the http2 pool would mean the take
+    /// stream and ack traffic competed on the same multiplexed
+    /// connection, which is undesirable.
+    pub(crate) http1: reqwest::Client,
 }
 
 /// Raw API format body for a single enqueue request.

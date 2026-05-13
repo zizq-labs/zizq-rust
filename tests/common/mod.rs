@@ -32,9 +32,17 @@ struct Response_ {
     body: Bytes,
 }
 
-/// Tiny h2c test server. Captures incoming requests and serves a configurable
-/// canned response. Bind to 127.0.0.1 on a random port; the assigned URL is
-/// available on `MockServer::url`.
+#[derive(Clone, Copy)]
+enum Protocol {
+    Http2,
+    Http1,
+}
+
+/// Tiny in-process test server. Captures incoming requests and serves
+/// a configurable canned response. Bound to 127.0.0.1 on a random
+/// port; the assigned URL is available on `MockServer::url`. Speaks
+/// either HTTP/2 (h2c) or HTTP/1.1 depending on which `start` variant
+/// is used.
 pub struct MockServer {
     pub url: String,
     captured: Arc<Mutex<Vec<CapturedRequest>>>,
@@ -42,7 +50,22 @@ pub struct MockServer {
 }
 
 impl MockServer {
+    /// Start a server speaking HTTP/2 with prior knowledge (h2c).
+    /// Used by the request/response endpoint tests.
+    #[allow(dead_code)]
     pub async fn start() -> Self {
+        Self::start_with(Protocol::Http2).await
+    }
+
+    /// Start a server speaking HTTP/1.1. Used by the streaming
+    /// `/jobs/take` tests since the client uses its HTTP/1.1 pool
+    /// for that endpoint.
+    #[allow(dead_code)]
+    pub async fn start_http1() -> Self {
+        Self::start_with(Protocol::Http1).await
+    }
+
+    async fn start_with(protocol: Protocol) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}");
@@ -86,9 +109,15 @@ impl MockServer {
                                 .and_then(|v| v.to_str().ok())
                                 .map(str::to_string);
 
+                            let path = parts
+                                .uri
+                                .path_and_query()
+                                .map(|pq| pq.as_str().to_string())
+                                .unwrap_or_else(|| parts.uri.path().to_string());
+
                             captured.lock().await.push(CapturedRequest {
                                 method: parts.method.to_string(),
-                                path: parts.uri.path().to_string(),
+                                path,
                                 content_type,
                                 accept,
                                 body: bytes.to_vec(),
@@ -104,9 +133,18 @@ impl MockServer {
                         }
                     });
 
-                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                        .serve_connection(io, svc)
-                        .await;
+                    match protocol {
+                        Protocol::Http2 => {
+                            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                                .serve_connection(io, svc)
+                                .await;
+                        }
+                        Protocol::Http1 => {
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, svc)
+                                .await;
+                        }
+                    }
                 });
             }
         });
@@ -118,6 +156,7 @@ impl MockServer {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn set_response_msgpack<T: serde::Serialize>(&self, status: u16, value: &T) {
         let mut buf = Vec::new();
         let mut ser = rmp_serde::Serializer::new(&mut buf)

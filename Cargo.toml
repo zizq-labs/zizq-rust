@@ -13,7 +13,7 @@ keywords = ["job-queue", "message-queue", "background-worker", "cron", "schedule
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rmp-serde = "1"
@@ -21,9 +21,11 @@ thiserror = "2"
 url = "2"
 time = { version = "0.3", features = ["serde", "macros"] }
 bytes = "1"
+futures-core = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-hyper = { version = "1", features = ["server", "http2"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
 http-body-util = "0.1"
+futures-util = "0.3"

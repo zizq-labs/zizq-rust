@@ -15,6 +15,9 @@
 //!   (queue, priority, retry limit, uniqueness).
 //! - [`Client::enqueue`] returns an [`EnqueueBuilder`] that chains
 //!   per-job overrides and awaits to send the request.
+//! - [`Client::take`] opens a long-lived stream of jobs to process,
+//!   acknowledged via [`Client::report_success`] (or
+//!   [`Client::report_failure`] on error).
 //!
 //! The API serialization format defaults to [`Format::MessagePack`];
 //! switch to [`Format::Json`] if you prefer a human-readable payload.
@@ -22,7 +25,11 @@
 //!
 //! # Getting started
 //!
+//! Define a [`JobKind`] for each payload type your application
+//! produces or consumes. Producers enqueue, consumers stream-and-ack.
+//!
 //! ```no_run
+//! use futures_util::TryStreamExt;
 //! use serde::{Deserialize, Serialize};
 //! use zizq::{Client, JobKind};
 //!
@@ -36,17 +43,39 @@
 //!     const QUEUE: &'static str = "emails";
 //! }
 //!
+//! /// Producer side — enqueue work.
+//! async fn produce(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+//!     client
+//!         .enqueue(SendEmail { to: "alice@example.com".into() })
+//!         .priority(100)
+//!         .await?;
+//!     Ok(())
+//! }
+//!
+//! /// Consumer side — pull jobs and acknowledge them. In practice
+//! /// you'd dispatch the payload to a handler and report success
+//! /// or failure based on the result.
+//! async fn consume(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut stream = client
+//!         .take()
+//!         .queues(["emails"])
+//!         .prefetch(8)
+//!         .await?;
+//!
+//!     while let Some(job) = stream.try_next().await? {
+//!         // ... do the work ...
+//!         client.report_success(&job.id).await?;
+//!     }
+//!     Ok(())
+//! }
+//!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::builder()
 //!     .url("http://127.0.0.1:7890")
 //!     .build()?;
 //!
-//! let job = client
-//!     .enqueue(SendEmail { to: "alice@example.com".into() })
-//!     .priority(100)
-//!     .await?;
-//!
-//! println!("enqueued {}", job.id);
+//! produce(&client).await?;
+//! consume(&client).await?;
 //! # Ok(()) }
 //! ```
 
@@ -57,6 +86,7 @@ mod failure;
 mod format;
 mod job;
 mod resources;
+mod take;
 mod timestamp;
 mod unique_key;
 
@@ -67,4 +97,5 @@ pub use failure::FailureBuilder;
 pub use format::Format;
 pub use job::JobKind;
 pub use resources::{BackoffConfig, Job, JobStatus, RetentionConfig};
+pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};

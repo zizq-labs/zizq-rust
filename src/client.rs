@@ -18,6 +18,7 @@ use url::Url;
 
 use crate::enqueue::EnqueueBuilder;
 use crate::error::ZizqError;
+use crate::failure::FailureBuilder;
 use crate::format::Format;
 use crate::job::JobKind;
 use crate::resources::{BackoffConfig, Job, RetentionConfig};
@@ -48,27 +49,6 @@ pub struct Client {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
-pub(crate) struct Inner {
-    /// The server base URL e.g. "http://localhost:7890"
-    pub(crate) base_url: Url,
-
-    /// Whether or not we're using Json or MessagePack.
-    pub(crate) format: Format,
-
-    /// Persistent multiplexing HTTP/2 client.
-    /// Supports h2c so HTTP/2 can be used without TLS.
-    pub(crate) http2: reqwest::Client,
-
-    // Placeholder for a separate HTTP/1.1 pool, used later by the
-    // streaming /jobs/take endpoint. When wired up it will share the
-    // same connect_timeout / read_timeout / tcp_keepalive values as
-    // http2 — read_timeout is the idle-detection knob for the
-    // long-lived stream, kept fresh by the server's heartbeats.
-    #[allow(dead_code)]
-    pub(crate) http1: Option<reqwest::Client>,
-}
-
 impl Client {
     /// Start building a new client. Equivalent to
     /// [`ClientBuilder::default`].
@@ -83,8 +63,152 @@ impl Client {
     ///
     /// The payload type must implement [`JobKind`], which supplies the
     /// API-level type name and any per-type defaults.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use serde::{Deserialize, Serialize};
+    /// use zizq::{Client, JobKind};
+    ///
+    /// #[derive(Serialize, Deserialize)]
+    /// struct SendEmail { to: String }
+    ///
+    /// impl JobKind for SendEmail {
+    ///     const NAME: &'static str = "send_email";
+    ///     const QUEUE: &'static str = "emails";
+    /// }
+    ///
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let job = client
+    ///     .enqueue(SendEmail { to: "alice@example.com".into() })
+    ///     .priority(50)
+    ///     .await?;
+    ///
+    /// println!("enqueued {} on {}", job.id, job.queue);
+    /// # Ok(()) }
+    /// ```
     pub fn enqueue<T: JobKind>(&self, payload: T) -> EnqueueBuilder<'_, T> {
         EnqueueBuilder::new(self, payload)
+    }
+
+    /// Acknowledge a job as successfully completed.
+    ///
+    /// Until a job is acknowledged (or failed via [`Client::report_failure`])
+    /// the server does not send any new jobs to the connected Worker as the
+    /// job remains in the in-flight set, which counts against the worker's
+    /// prefetch limit and the server's global in-flight limit. Both the
+    /// durable storage and the at-least-once delivery model mean the same job
+    /// will be automatically redelivered if the client disconnects before
+    /// acknowledging — handlers should be idempotent by design.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client, job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// // After successfully processing a job, acknowledge it so the
+    /// // server stops considering it in-flight and resumes sending new
+    /// // work to this worker.
+    /// client.report_success(job_id).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn report_success(&self, id: &str) -> Result<(), ZizqError> {
+        let url = self.url(&["jobs", id, "success"]);
+        let response = self.send(reqwest::Method::POST, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
+            .await
+    }
+
+    /// Acknowledge multiple jobs as successfully completed in one
+    /// request.
+    ///
+    /// The server may answer 204 (all acknowledged) or 422 (some IDs not
+    /// found, typically already acked or purged); both are treated as
+    /// success as there is not further action for the client to take, so
+    /// retries of this operation are safe and idempotent. Other statuses are
+    /// surfaced as [`ZizqError::Response`].
+    ///
+    /// Workers are advised to use this method for acknowledgement when under
+    /// high throughput where ack's are being generated rapidly, as this can
+    /// significantly improve throughput by reducing request traffic and LSM
+    /// database transaction volume on the Zizq backend.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Acknowledge a batch of completed jobs in one request.
+    /// client.report_success_bulk(["job-1", "job-2", "job-3"]).await?;
+    ///
+    /// // Also works with owned strings, e.g. accumulated from previous responses.
+    /// let ids: Vec<String> = vec!["job-4".into(), "job-5".into()];
+    /// client.report_success_bulk(ids).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn report_success_bulk<I, S>(&self, ids: I) -> Result<(), ZizqError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let body = BulkSuccessBody {
+            ids: ids.into_iter().map(Into::into).collect(),
+        };
+        let bytes = encode_body(&body, self.inner.format)?;
+        let url = self.url(&["jobs", "success"]);
+        let response = self.send(reqwest::Method::POST, url, Some(bytes)).await?;
+        self.expect_status(
+            response,
+            &[
+                reqwest::StatusCode::NO_CONTENT,
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            ],
+        )
+        .await
+    }
+
+    /// Begin reporting a job failure. Returns a [`FailureBuilder`] that
+    /// chains optional error details (error type, backtrace, forced
+    /// retry time, kill flag) and is awaited to send the request.
+    ///
+    /// The response is the updated [`Job`] with its new attempt count
+    /// and status — either back to `Scheduled` for another attempt, or
+    /// `Dead` if the retry limit was exhausted (or the `kill` flag was
+    /// set).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client, job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Minimal — just a message; the server applies the job's backoff
+    /// // and reschedules until the retry budget is exhausted.
+    /// client.report_failure(job_id, "smtp timeout").await?;
+    ///
+    /// // With richer context and a forced retry time that bypasses
+    /// // backoff.
+    /// client
+    ///     .report_failure(job_id, "rate limited by downstream")
+    ///     .error_type("RateLimitError")
+    ///     .backtrace("...stack trace from the worker...")
+    ///     .retry_in(Duration::from_secs(60))
+    ///     .await?;
+    ///
+    /// // Permanent failure — kill the job immediately regardless of
+    /// // retry budget.
+    /// client
+    ///     .report_failure(job_id, "payload references deleted entity")
+    ///     .kill()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn report_failure(
+        &self,
+        id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> FailureBuilder<'_> {
+        FailureBuilder::new(self, id.into(), message.into())
     }
 
     /// Submit a resolved enqueue request and return the resulting
@@ -99,38 +223,98 @@ impl Client {
     /// user's payload type.
     pub(crate) async fn enqueue_raw(&self, req: EnqueueRequest) -> Result<Job, ZizqError> {
         let bytes = encode_body(&req, self.inner.format)?;
+        let url = self.url(&["jobs"]);
+        let response = self.send(reqwest::Method::POST, url, Some(bytes)).await?;
+        self.parse_job_response(response).await
+    }
 
-        let url = self
-            .inner
-            .base_url
-            .join("/jobs")
-            .map_err(ZizqError::InvalidUrl)?;
-        let response = self
+    /// Submit a resolved failure request and return the updated
+    /// [`Job`]. Transport-layer entry point used by [`FailureBuilder`].
+    pub(crate) async fn report_failure_raw(
+        &self,
+        id: &str,
+        req: FailureRequest,
+    ) -> Result<Job, ZizqError> {
+        let bytes = encode_body(&req, self.inner.format)?;
+        let url = self.url(&["jobs", id, "failure"]);
+        let response = self.send(reqwest::Method::POST, url, Some(bytes)).await?;
+        self.parse_job_response(response).await
+    }
+
+    /// Build an absolute URL by appending the given path segments to
+    /// the configured base URL. Segments are percent-encoded by the
+    /// `url` crate, so IDs with reserved characters are handled
+    /// correctly. Appends rather than overrides, so a base URL with a
+    /// path prefix (e.g. `http://host/api`) keeps that prefix.
+    fn url(&self, segments: &[&str]) -> Url {
+        let mut url = self.inner.base_url.clone();
+        url.path_segments_mut()
+            .expect("base URL is http(s)")
+            .pop_if_empty()
+            .extend(segments);
+        url
+    }
+
+    /// Issue an HTTP request with the configured format negotiation.
+    /// `body` is pre-encoded bytes; pass `None` for endpoints that
+    /// don't send a request body.
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+    ) -> Result<reqwest::Response, ZizqError> {
+        let mut req = self
             .inner
             .http2
-            .post(url)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                self.inner.format.content_type(),
-            )
-            .header(reqwest::header::ACCEPT, self.inner.format.content_type())
-            .body(bytes)
-            .send()
-            .await?;
+            .request(method, url)
+            .header(reqwest::header::ACCEPT, self.inner.format.content_type());
+        if let Some(bytes) = body {
+            req = req
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    self.inner.format.content_type(),
+                )
+                .body(bytes);
+        }
+        Ok(req.send().await?)
+    }
 
+    /// Consume a response that's expected to have one of the given
+    /// status codes and no decodable body. Maps any other status to
+    /// [`ZizqError::Response`] with the server-supplied message.
+    async fn expect_status(
+        &self,
+        response: reqwest::Response,
+        ok: &[reqwest::StatusCode],
+    ) -> Result<(), ZizqError> {
         let status = response.status();
-        let response_format = self.response_format(&response);
+        if ok.contains(&status) {
+            return Ok(());
+        }
+        let format = self.response_format(&response);
         let body_bytes = response.bytes().await?;
+        let message = extract_error_message(&body_bytes, format);
+        Err(ZizqError::Response {
+            status: status.as_u16(),
+            message,
+        })
+    }
 
+    /// Consume a response that's expected to contain a [`Job`] body on
+    /// success. Errors are decoded via [`extract_error_message`].
+    async fn parse_job_response(&self, response: reqwest::Response) -> Result<Job, ZizqError> {
+        let status = response.status();
+        let format = self.response_format(&response);
+        let body_bytes = response.bytes().await?;
         if !status.is_success() {
-            let message = extract_error_message(&body_bytes, response_format);
+            let message = extract_error_message(&body_bytes, format);
             return Err(ZizqError::Response {
                 status: status.as_u16(),
                 message,
             });
         }
-
-        decode_body::<Job>(&body_bytes, response_format)
+        decode_body::<Job>(&body_bytes, format)
     }
 
     /// Pick the [`Format`] to decode a response in based on its
@@ -148,119 +332,6 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .and_then(Format::from_content_type)
             .unwrap_or(self.inner.format)
-    }
-}
-
-/// Server-emitted error body. The API guarantees the `error` field is
-/// always present on error responses; richer structured fields (e.g.
-/// `supported` on 406) are intentionally discarded — if the user needs
-/// them later we can swap the model out.
-#[derive(serde::Deserialize)]
-struct ApiError {
-    error: String,
-}
-
-/// Extract a human-readable error message from a non-2xx response body.
-///
-/// Tries to decode `{ "error": "..." }` in the configured format first;
-/// on failure falls back to JSON (covers 406 Not Acceptable, which the
-/// server must reply to in JSON since the client asked for a format
-/// the server doesn't support); finally falls back to a lossy UTF-8
-/// rendering of the raw bytes so we always surface *something*.
-fn extract_error_message(body: &[u8], format: Format) -> String {
-    // Try the assumed format.
-    if let Ok(e) = decode_body::<ApiError>(body, format) {
-        return e.error;
-    }
-    // Fallback on trying JSON.
-    if format != Format::Json {
-        if let Ok(e) = decode_body::<ApiError>(body, Format::Json) {
-            return e.error;
-        }
-    }
-    // Fallback on extracting UTF-8.
-    String::from_utf8_lossy(body).into_owned()
-}
-
-/// Raw API format body for a single enqueue request.
-///
-/// Constructed by [`EnqueueBuilder`] from its resolved per-job
-/// parameters and handed to [`Client::enqueue_raw`]. The payload is
-/// pre-serialised by the builder into a [`serde_json::Value`] so this
-/// struct is fully owned, non-generic, and `Send` — which keeps the
-/// returned future `Send` regardless of the original payload type.
-///
-/// Field names match the API's snake_case shape; `Option` fields are
-/// omitted from the wire when `None`.
-#[derive(Serialize)]
-pub(crate) struct EnqueueRequest {
-    /// The raw job type used in the API.
-    #[serde(rename = "type")]
-    pub(crate) job_type: &'static str,
-
-    /// Queue this job is placed on.
-    pub(crate) queue: String,
-
-    /// Arbitrary application-defined JSON-compatible payload.
-    pub(crate) payload: serde_json::Value,
-
-    /// Job priority. Lower values run sooner.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) priority: Option<u32>,
-
-    /// Optional timestamp at which this job becomes ready to run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) ready_at: Option<i64>,
-
-    /// Optional retry limit after which the job is killed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) retry_limit: Option<u32>,
-
-    /// Optional backoff policy for this job.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) backoff: Option<BackoffConfig>,
-
-    /// Optional retention policy for this job.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) retention: Option<RetentionConfig>,
-
-    /// Optional unique key for enqueue-time deduplication.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unique_key: Option<String>,
-
-    /// Optional scope for the unique key.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) unique_while: Option<UniqueScope>,
-}
-
-/// Encode a serializable body using the configured [`Format`].
-pub(crate) fn encode_body<B: Serialize>(body: &B, format: Format) -> Result<Vec<u8>, ZizqError> {
-    match format {
-        Format::Json => serde_json::to_vec(body).map_err(|e| ZizqError::Encode(e.to_string())),
-        Format::MessagePack => {
-            // Use struct-map serialization so field names are preserved on the wire,
-            // matching the JSON shape and what the other clients send.
-            let mut buf = Vec::new();
-            let mut ser = rmp_serde::Serializer::new(&mut buf)
-                .with_struct_map()
-                .with_human_readable();
-            body.serialize(&mut ser)
-                .map_err(|e| ZizqError::Encode(e.to_string()))?;
-            Ok(buf)
-        }
-    }
-}
-
-/// Decode response bytes using the configured [`Format`].
-pub(crate) fn decode_body<R: DeserializeOwned>(
-    bytes: &[u8],
-    format: Format,
-) -> Result<R, ZizqError> {
-    match format {
-        Format::Json => serde_json::from_slice(bytes).map_err(|e| ZizqError::Decode(e.to_string())),
-        Format::MessagePack => {
-            rmp_serde::from_slice(bytes).map_err(|e| ZizqError::Decode(e.to_string()))
-        }
     }
 }
 
@@ -367,6 +438,177 @@ impl ClientBuilder {
             }),
         })
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct Inner {
+    /// The server base URL e.g. "http://localhost:7890"
+    pub(crate) base_url: Url,
+
+    /// Whether or not we're using Json or MessagePack.
+    pub(crate) format: Format,
+
+    /// Persistent multiplexing HTTP/2 client.
+    /// Supports h2c so HTTP/2 can be used without TLS.
+    pub(crate) http2: reqwest::Client,
+
+    // Placeholder for a separate HTTP/1.1 pool, used later by the
+    // streaming /jobs/take endpoint. When wired up it will share the
+    // same connect_timeout / read_timeout / tcp_keepalive values as
+    // http2 — read_timeout is the idle-detection knob for the
+    // long-lived stream, kept fresh by the server's heartbeats.
+    #[allow(dead_code)]
+    pub(crate) http1: Option<reqwest::Client>,
+}
+
+/// Raw API format body for a single enqueue request.
+///
+/// Constructed by [`EnqueueBuilder`] from its resolved per-job
+/// parameters and handed to [`Client::enqueue_raw`]. The payload is
+/// pre-serialised by the builder into a [`serde_json::Value`] so this
+/// struct is fully owned, non-generic, and `Send` — which keeps the
+/// returned future `Send` regardless of the original payload type.
+///
+/// Field names match the API's snake_case shape; `Option` fields are
+/// omitted from the resulting payload when `None`.
+#[derive(Serialize)]
+pub(crate) struct EnqueueRequest {
+    /// The raw job type used in the API.
+    #[serde(rename = "type")]
+    pub(crate) job_type: &'static str,
+
+    /// Queue this job is placed on.
+    pub(crate) queue: String,
+
+    /// Arbitrary application-defined JSON-compatible payload.
+    pub(crate) payload: serde_json::Value,
+
+    /// Job priority. Lower values run sooner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) priority: Option<u32>,
+
+    /// Optional timestamp at which this job becomes ready to run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ready_at: Option<i64>,
+
+    /// Optional retry limit after which the job is killed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retry_limit: Option<u32>,
+
+    /// Optional backoff policy for this job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) backoff: Option<BackoffConfig>,
+
+    /// Optional retention policy for this job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retention: Option<RetentionConfig>,
+
+    /// Optional unique key for enqueue-time deduplication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unique_key: Option<String>,
+
+    /// Optional scope for the unique key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unique_while: Option<UniqueScope>,
+}
+
+/// Raw API format body for reporting a job failure.
+///
+/// Constructed by [`FailureBuilder`] and handed to
+/// [`Client::report_failure_raw`]. All fields are owned, so the
+/// resulting future is `Send` without further constraints.
+///
+/// `kill` is only emitted when `true`. Passing `false` does nothing.
+#[derive(Serialize)]
+pub(crate) struct FailureRequest {
+    /// Arbitrary error message to be captured with the failure.
+    pub(crate) message: String,
+
+    /// Details of the type of error that caused the failure (i.e. the
+    /// name of the type).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_type: Option<String>,
+
+    /// Optional backtrace, if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) backtrace: Option<String>,
+
+    /// Optional override for when the job should be retried, overriding
+    /// the job's backoff policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) retry_at: Option<i64>,
+
+    /// Kill flag, set to `true` to explicitly prevent further retries.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) kill: bool,
+}
+
+/// Raw API format body for a bulk-success (bulk ack) request.
+#[derive(Serialize)]
+struct BulkSuccessBody {
+    ids: Vec<String>,
+}
+
+/// Server-emitted error body. The API guarantees the `error` field is
+/// always present on error responses; richer structured fields (e.g.
+/// `supported` on 406) are intentionally discarded — if the user needs
+/// them later we can swap the model out.
+#[derive(serde::Deserialize)]
+struct ApiError {
+    error: String,
+}
+
+/// Encode a serializable body using the configured [`Format`].
+pub(crate) fn encode_body<B: Serialize>(body: &B, format: Format) -> Result<Vec<u8>, ZizqError> {
+    match format {
+        Format::Json => serde_json::to_vec(body).map_err(|e| ZizqError::Encode(e.to_string())),
+        Format::MessagePack => {
+            // Use struct-map serialization so field names are preserved on the wire,
+            // matching the JSON shape and what the other clients send.
+            let mut buf = Vec::new();
+            let mut ser = rmp_serde::Serializer::new(&mut buf)
+                .with_struct_map()
+                .with_human_readable();
+            body.serialize(&mut ser)
+                .map_err(|e| ZizqError::Encode(e.to_string()))?;
+            Ok(buf)
+        }
+    }
+}
+
+/// Decode response bytes using the configured [`Format`].
+pub(crate) fn decode_body<R: DeserializeOwned>(
+    bytes: &[u8],
+    format: Format,
+) -> Result<R, ZizqError> {
+    match format {
+        Format::Json => serde_json::from_slice(bytes).map_err(|e| ZizqError::Decode(e.to_string())),
+        Format::MessagePack => {
+            rmp_serde::from_slice(bytes).map_err(|e| ZizqError::Decode(e.to_string()))
+        }
+    }
+}
+
+/// Extract a human-readable error message from a non-2xx response body.
+///
+/// Tries to decode `{ "error": "..." }` in the configured format first;
+/// on failure falls back to JSON (covers 406 Not Acceptable, which the
+/// server must reply to in JSON since the client asked for a format
+/// the server doesn't support); finally falls back to a lossy UTF-8
+/// rendering of the raw bytes so we always surface *something*.
+fn extract_error_message(body: &[u8], format: Format) -> String {
+    // Try the assumed format.
+    if let Ok(e) = decode_body::<ApiError>(body, format) {
+        return e.error;
+    }
+    // Fallback on trying JSON.
+    if format != Format::Json {
+        if let Ok(e) = decode_body::<ApiError>(body, Format::Json) {
+            return e.error;
+        }
+    }
+    // Fallback on extracting UTF-8.
+    String::from_utf8_lossy(body).into_owned()
 }
 
 #[cfg(test)]

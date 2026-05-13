@@ -53,14 +53,17 @@
 mod client;
 mod enqueue;
 mod error;
+mod failure;
 mod format;
 mod job;
 mod resources;
+mod timestamp;
 mod unique_key;
 
 pub use client::{Client, ClientBuilder};
 pub use enqueue::EnqueueBuilder;
 pub use error::ZizqError;
+pub use failure::FailureBuilder;
 pub use format::Format;
 pub use job::JobKind;
 pub use resources::{BackoffConfig, Job, JobStatus, RetentionConfig};

@@ -23,6 +23,7 @@ use crate::client::{Client, EnqueueRequest};
 use crate::error::ZizqError;
 use crate::job::JobKind;
 use crate::resources::{BackoffConfig, Job, RetentionConfig};
+use crate::timestamp::to_ms_epoch;
 use crate::unique_key::UniqueKey;
 
 /// Builder for an enqueue request.
@@ -93,21 +94,6 @@ pub struct EnqueueBuilder<'a, T> {
 }
 
 impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
-    /// Initialize a new `EnqueueBuilder` for the given `Client` and `JobKind`.
-    pub(crate) fn new(client: &'a Client, payload: T) -> Self {
-        Self {
-            client,
-            payload,
-            queue: None,
-            priority: None,
-            ready_at_ms: None,
-            retry_limit: None,
-            backoff: None,
-            retention: None,
-            unique_key: None,
-        }
-    }
-
     /// Override the queue this job is placed on. Overrides [`JobKind::QUEUE`].
     pub fn queue(mut self, queue: impl Into<String>) -> Self {
         self.queue = Some(queue.into());
@@ -168,6 +154,21 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
         self.unique_key = Some(key.into());
         self
     }
+
+    /// Initialize a new `EnqueueBuilder` for the given `Client` and `JobKind`.
+    pub(crate) fn new(client: &'a Client, payload: T) -> Self {
+        Self {
+            client,
+            payload,
+            queue: None,
+            priority: None,
+            ready_at_ms: None,
+            retry_limit: None,
+            backoff: None,
+            retention: None,
+            unique_key: None,
+        }
+    }
 }
 
 impl<'a, T: JobKind> IntoFuture for EnqueueBuilder<'a, T> {
@@ -214,11 +215,6 @@ impl<'a, T: JobKind> IntoFuture for EnqueueBuilder<'a, T> {
                 .await
         })
     }
-}
-
-fn to_ms_epoch(t: OffsetDateTime) -> i64 {
-    let nanos = t.unix_timestamp_nanos();
-    (nanos / 1_000_000) as i64
 }
 
 #[cfg(test)]

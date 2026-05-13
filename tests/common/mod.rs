@@ -13,6 +13,9 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+// Fields are read selectively per test binary; allow dead_code so
+// the lifecycle binary doesn't complain about content_type/accept.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CapturedRequest {
     pub method: String,

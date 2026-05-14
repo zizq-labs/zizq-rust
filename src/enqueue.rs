@@ -184,8 +184,12 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             Some(uk) => (Some(uk.key), uk.scope),
             None => (None, None),
         };
-        let payload =
-            serde_json::to_value(&self.payload).map_err(|e| ZizqError::Encode(e.to_string()))?;
+        // Box the payload as a type-erased serializer — at body encode
+        // time it walks through serde once, directly, without a
+        // `serde_json::Value` intermediate allocation. `T: JobKind`
+        // already requires `Send + 'static`, which is enough to
+        // satisfy the dyn-trait bound here.
+        let payload: Box<dyn erased_serde::Serialize + Send> = Box::new(self.payload);
         Ok(EnqueueRequest {
             job_type: T::NAME,
             queue,
@@ -251,7 +255,7 @@ mod tests {
         let body = EnqueueRequest {
             job_type: SendEmail::NAME,
             queue: SendEmail::QUEUE.to_string(),
-            payload: serde_json::json!({ "to": "a@b" }),
+            payload: Box::new(serde_json::json!({ "to": "a@b" })),
             priority: SendEmail::PRIORITY,
             ready_at: None,
             retry_limit: None,
@@ -277,7 +281,7 @@ mod tests {
         let body = EnqueueRequest {
             job_type: Bare::NAME,
             queue: Bare::QUEUE.to_string(),
-            payload: serde_json::json!({ "x": 7 }),
+            payload: Box::new(serde_json::json!({ "x": 7 })),
             priority: None,
             ready_at: None,
             retry_limit: None,
@@ -302,7 +306,7 @@ mod tests {
         let body = EnqueueRequest {
             job_type: SendEmail::NAME,
             queue: SendEmail::QUEUE.to_string(),
-            payload: serde_json::json!({ "to": "a@b" }),
+            payload: Box::new(serde_json::json!({ "to": "a@b" })),
             priority: None,
             ready_at: None,
             retry_limit: None,
@@ -367,7 +371,7 @@ mod tests {
         let body = EnqueueRequest {
             job_type: SendEmail::NAME,
             queue: SendEmail::QUEUE.to_string(),
-            payload: serde_json::json!({ "to": "a@b" }),
+            payload: Box::new(serde_json::json!({ "to": "a@b" })),
             priority: None,
             ready_at: None,
             retry_limit: None,

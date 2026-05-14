@@ -18,6 +18,7 @@ reqwest = { version = "0.12", default-features = false, features = ["http2", "st
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rmp-serde = "1"
+erased-serde = "0.4"
 thiserror = "2"
 url = "2"
 time = { version = "0.3", features = ["serde", "macros"] }

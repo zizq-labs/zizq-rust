@@ -652,8 +652,12 @@ pub(crate) struct EnqueueRequest {
     /// Queue this job is placed on.
     pub(crate) queue: String,
 
-    /// Arbitrary application-defined JSON-compatible payload.
-    pub(crate) payload: serde_json::Value,
+    /// Type-erased payload — boxed at builder time so each item walks
+    /// through serde exactly once when the outer body is encoded,
+    /// without an intermediate `serde_json::Value` tree. The vtable
+    /// indirection is essentially free compared to the cost of an
+    /// extra walk + Value-tree allocation per job.
+    pub(crate) payload: Box<dyn erased_serde::Serialize + Send>,
 
     /// Job priority. Lower values run sooner.
     #[serde(skip_serializing_if = "Option::is_none")]

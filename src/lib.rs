@@ -107,6 +107,7 @@
 //! # Ok(()) }
 //! ```
 
+mod bulk_enqueue;
 mod client;
 mod enqueue;
 mod error;
@@ -120,6 +121,7 @@ mod timestamp;
 mod unique_key;
 mod worker;
 
+pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};
 pub use enqueue::EnqueueBuilder;
 pub use error::ZizqError;

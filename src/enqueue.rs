@@ -169,6 +169,36 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             unique_key: None,
         }
     }
+
+    /// Resolve `JobKind` defaults, serialise the payload, and produce
+    /// the owned, non-generic [`EnqueueRequest`]. Shared by the
+    /// single-enqueue [`IntoFuture`] impl and the
+    /// [`BulkEnqueueBuilder`]-side `.add` / `.push` methods, which both
+    /// need the resolved request without sending it.
+    ///
+    /// [`BulkEnqueueBuilder`]: crate::BulkEnqueueBuilder
+    pub(crate) fn into_request(self) -> Result<EnqueueRequest, ZizqError> {
+        let queue = self.queue.unwrap_or_else(|| T::QUEUE.to_string());
+        let unique_key = self.unique_key.or_else(|| self.payload.unique_key());
+        let (unique_key_str, unique_scope) = match unique_key {
+            Some(uk) => (Some(uk.key), uk.scope),
+            None => (None, None),
+        };
+        let payload =
+            serde_json::to_value(&self.payload).map_err(|e| ZizqError::Encode(e.to_string()))?;
+        Ok(EnqueueRequest {
+            job_type: T::NAME,
+            queue,
+            payload,
+            priority: self.priority.or(T::PRIORITY),
+            ready_at: self.ready_at_ms,
+            retry_limit: self.retry_limit.or(T::RETRY_LIMIT),
+            backoff: self.backoff.or(T::BACKOFF),
+            retention: self.retention.or(T::RETENTION),
+            unique_key: unique_key_str,
+            unique_while: unique_scope,
+        })
+    }
 }
 
 impl<'a, T: JobKind> IntoFuture for EnqueueBuilder<'a, T> {
@@ -181,38 +211,10 @@ impl<'a, T: JobKind> IntoFuture for EnqueueBuilder<'a, T> {
     /// Called to send the request when .await is invoked at the end of the
     /// builder chain.
     fn into_future(self) -> Self::IntoFuture {
+        let client = self.client;
         Box::pin(async move {
-            // Associated trait values may be overridden at the call site,
-            // hence the unwrap_or_else / or usage.
-
-            let queue = self.queue.unwrap_or_else(|| T::QUEUE.to_string());
-            let unique_key = self.unique_key.or_else(|| self.payload.unique_key());
-
-            let (unique_key_str, unique_scope) = match unique_key {
-                Some(uk) => (Some(uk.key), uk.scope),
-                None => (None, None),
-            };
-
-            // Serialize the payload to a Value here so the request handed
-            // to enqueue_raw is fully owned (no generics, no borrows of
-            // &self.payload alive across the .await).
-            let payload = serde_json::to_value(&self.payload)
-                .map_err(|e| ZizqError::Encode(e.to_string()))?;
-
-            self.client
-                .enqueue_raw(EnqueueRequest {
-                    job_type: T::NAME,
-                    queue,
-                    payload,
-                    priority: self.priority.or(T::PRIORITY),
-                    ready_at: self.ready_at_ms,
-                    retry_limit: self.retry_limit.or(T::RETRY_LIMIT),
-                    backoff: self.backoff.or(T::BACKOFF),
-                    retention: self.retention.or(T::RETENTION),
-                    unique_key: unique_key_str,
-                    unique_while: unique_scope,
-                })
-                .await
+            let req = self.into_request()?;
+            client.enqueue_raw(req).await
         })
     }
 }

@@ -67,13 +67,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Enqueue phase ---
     //
-    // Sequential enqueue so jobs land in strict FIFO order. The
-    // dequeue phase relies on this to know that seeing `n == JOB_COUNT`
-    // means every prior job has already been served to a worker.
+    // Chunked bulk enqueue (1k jobs per request). One single bulk call
+    // for a huge JOB_COUNT would block the connection and balloon
+    // memory; one job per call wastes most of the bulk path. Sequential
+    // batches preserve strict FIFO order (`enqueue_bulk` is atomic on
+    // the server within a batch, and we await each batch before
+    // starting the next), so the dequeue phase can still rely on
+    // `n == JOB_COUNT` meaning every prior job has already been served.
 
+    const BATCH_SIZE: u64 = 1000;
     let enqueue_start = Instant::now();
-    for n in 1..=job_count {
-        client.enqueue(Bench { n }).await?;
+    let mut start = 1u64;
+    while start <= job_count {
+        let end = (start + BATCH_SIZE - 1).min(job_count);
+        let mut batch = client.enqueue_bulk();
+        for n in start..=end {
+            batch.push(client.enqueue(Bench { n }));
+        }
+        batch.await?;
+        start = end + 1;
     }
 
     let enqueue_elapsed = enqueue_start.elapsed().as_secs_f64();

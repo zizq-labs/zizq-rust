@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;
 
+use crate::bulk_enqueue::BulkEnqueueBuilder;
 use crate::enqueue::EnqueueBuilder;
 use crate::error::ZizqError;
 use crate::failure::FailureBuilder;
@@ -90,6 +91,50 @@ impl Client {
     /// ```
     pub fn enqueue<T: JobKind>(&self, payload: T) -> EnqueueBuilder<'_, T> {
         EnqueueBuilder::new(self, payload)
+    }
+
+    /// Begin a bulk enqueue. Returns a [`BulkEnqueueBuilder`] that
+    /// collects per-job [`EnqueueBuilder`]s via [`BulkEnqueueBuilder::add`]
+    /// (chainable, consuming) or [`BulkEnqueueBuilder::push`] (mutating,
+    /// loop-friendly), and is finalised by awaiting it to send a single
+    /// `POST /jobs/bulk` request.
+    ///
+    /// Mixed [`JobKind`]s in one batch are fine — each per-job builder
+    /// is resolved (defaults applied, payload serialised) at the moment
+    /// it's added, then type-erased into the batched request body.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use serde::{Deserialize, Serialize};
+    /// use zizq::{Client, JobKind};
+    ///
+    /// #[derive(Serialize, Deserialize)]
+    /// struct SendEmail { to: String }
+    /// impl JobKind for SendEmail {
+    ///     const NAME: &'static str = "send_email";
+    /// }
+    ///
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Inline / chained:
+    /// let jobs = client
+    ///     .enqueue_bulk()
+    ///     .add(client.enqueue(SendEmail { to: "a@x".into() }).priority(50))
+    ///     .add(client.enqueue(SendEmail { to: "b@x".into() }))
+    ///     .await?;
+    /// assert_eq!(jobs.len(), 2);
+    ///
+    /// // Loop-style:
+    /// let mut batch = client.enqueue_bulk();
+    /// for i in 0..100 {
+    ///     batch.push(client.enqueue(SendEmail { to: format!("u{i}@x") }));
+    /// }
+    /// let jobs = batch.await?;
+    /// assert_eq!(jobs.len(), 100);
+    /// # Ok(()) }
+    /// ```
+    pub fn enqueue_bulk(&self) -> BulkEnqueueBuilder<'_> {
+        BulkEnqueueBuilder::new(self)
     }
 
     /// Acknowledge a job as successfully completed.
@@ -247,8 +292,7 @@ impl Client {
     }
 
     /// Submit a resolved enqueue request and return the resulting
-    /// [`Job`]. Owns URL construction, body encoding, headers, dispatch,
-    /// status handling, and response decoding.
+    /// [`Job`].
     ///
     /// This is the transport-layer entry point used by
     /// [`EnqueueBuilder`]; it knows nothing about [`JobKind`] or
@@ -261,6 +305,35 @@ impl Client {
         let url = self.url(&["jobs"]);
         let response = self.send(reqwest::Method::POST, url, Some(bytes)).await?;
         self.parse_job_response(response).await
+    }
+
+    /// Submit a resolved bulk enqueue request and return the resulting
+    /// `Vec` of [`Job`]s.
+    ///
+    /// This is the transport-layer entry point for `POST /jobs/bulk`.
+    /// Used by [`BulkEnqueueBuilder`]; resolved per-job defaults and
+    /// payload serialisation happen upstream so this method only deals
+    /// in fully-owned [`EnqueueRequest`] values.
+    pub(crate) async fn enqueue_bulk_raw(
+        &self,
+        req: BulkEnqueueRequest,
+    ) -> Result<Vec<Job>, ZizqError> {
+        let bytes = encode_body(&req, self.inner.format)?;
+        let url = self.url(&["jobs", "bulk"]);
+        let response = self.send(reqwest::Method::POST, url, Some(bytes)).await?;
+
+        let status = response.status();
+        let format = self.response_format(&response);
+        let body_bytes = response.bytes().await?;
+        if !status.is_success() {
+            let message = extract_error_message(&body_bytes, format);
+            return Err(ZizqError::Response {
+                status: status.as_u16(),
+                message,
+            });
+        }
+        let resp: BulkEnqueueResponse = decode_body(&body_bytes, format)?;
+        Ok(resp.jobs)
     }
 
     /// Submit a resolved failure request and return the updated
@@ -640,6 +713,21 @@ pub(crate) struct FailureRequest {
     /// Kill flag, set to `true` to explicitly prevent further retries.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) kill: bool,
+}
+
+/// Raw API format body for a bulk enqueue request — wraps a slice of
+/// per-job [`EnqueueRequest`]s. Matches the server's expected
+/// `{"jobs": [...]}` envelope.
+#[derive(Serialize)]
+pub(crate) struct BulkEnqueueRequest {
+    pub(crate) jobs: Vec<EnqueueRequest>,
+}
+
+/// Server response shape for a bulk enqueue — the created jobs in the
+/// order they were submitted.
+#[derive(serde::Deserialize)]
+struct BulkEnqueueResponse {
+    jobs: Vec<Job>,
 }
 
 /// Raw API format body for a bulk-success (bulk ack) request.

@@ -11,6 +11,7 @@ homepage = "https://zizq.io"
 documentation = "https://zizq.io/docs/clients/rust/"
 keywords = ["job-queue", "message-queue", "background-worker", "cron", "scheduler"]
 categories = ["asynchronous", "api-bindings"]
+exclude = ["examples/"]
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["http2", "stream"] }

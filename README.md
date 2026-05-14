@@ -28,22 +28,24 @@ self-contained job queue server.
       with retry / kill controls
 - [x] Structured error decoding that honours the server's
       `Content-Type` (handles 406 Not Acceptable correctly)
+- [x] `Worker` — long-running consumer with bounded concurrency,
+      auto-reconnect, batched acks, retry-aware nack, and graceful
+      shutdown
+- [x] `Router` — type-driven dispatch keyed by `JobKind::NAME`, so
+      one worker can serve many job types
 
 ## What's not done yet
 
 - [ ] Bulk enqueue
-- [ ] `Worker` / `Router` API — the high-level orchestration layer
-      built on the take + ack primitives
 - [ ] TLS (rustls and native-tls feature flags)
 - [ ] Other admin endpoints (PATCH/DELETE/GET, error queries, etc.)
 - [ ] Cron entry management
 
 ## Taster
 
-### Producer and consumer (working today)
+### Producer
 
 ```rust
-use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use zizq::{Client, JobKind};
 
@@ -58,31 +60,51 @@ impl JobKind for SendEmail {
     const PRIORITY: Option<u32> = Some(100);
 }
 
-/// Producer side — enqueue jobs.
-async fn produce(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::builder()
+        .url("http://127.0.0.1:7890")
+        .build()?;
+
     client
         .enqueue(SendEmail { to: "alice@example.com".into() })
         .priority(50)              // override the trait default
         .retry_limit(3)
         .await?;
+
     Ok(())
 }
+```
 
-/// Consumer side — stream jobs and acknowledge them. In a real
-/// application this would typically run in a separate process from
-/// the producer.
-async fn consume(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = client
-        .take()
-        .queues(["emails"])
-        .prefetch(8)
-        .await?;
+`JobKind` is the only required piece per job type — `NAME` is mandatory,
+everything else has a default. Per-call overrides on the
+`EnqueueBuilder` beat the trait defaults, and the future is finalised
+by awaiting the builder.
 
-    while let Some(job) = stream.try_next().await? {
-        // ... dispatch to a handler ...
-        client.report_success(&job.id).await?;
-    }
-    Ok(())
+### Consumer
+
+A `Worker` connects to `/jobs/take`, dispatches each job to your
+handler with bounded concurrency, batches acks, and reconnects on
+transient failures. Pair it with a `Router` to dispatch by job type —
+each `.route(...)` registers a typed handler keyed on
+`JobKind::NAME`, so there's no string matching at the call site. The
+same shape works for one job type or many.
+
+```rust
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use zizq::{Client, JobKind, Router, Worker};
+
+#[derive(Serialize, Deserialize)]
+struct SendEmail { to: String }
+impl JobKind for SendEmail {
+    const NAME: &'static str = "send_email";
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProcessReport { report_id: String }
+impl JobKind for ProcessReport {
+    const NAME: &'static str = "process_report";
 }
 
 #[tokio::main]
@@ -91,56 +113,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .url("http://127.0.0.1:7890")
         .build()?;
 
-    produce(&client).await?;
-    consume(&client).await?;
+    let worker = Worker::builder()
+        .client(client)
+        .concurrency(16)
+        .handler(
+            Router::new()
+                .route(async |job: SendEmail| {
+                    println!("sending email to {}", job.to);
+                    Ok::<(), Infallible>(())
+                })
+                .route(async |job: ProcessReport| {
+                    println!("processing report {}", job.report_id);
+                    Ok::<(), Infallible>(())
+                }),
+        )
+        .build()?;
+
+    // Graceful shutdown on Ctrl-C — drains in-flight handlers and
+    // acks (up to the configured shutdown_timeout) before returning.
+    worker.run(async { let _ = tokio::signal::ctrl_c().await; }).await?;
     Ok(())
 }
 ```
 
-`JobKind` is the only required piece per job type — `NAME` is mandatory,
-everything else has a default. Per-call overrides on the
-`EnqueueBuilder` beat the trait defaults, and the future is finalised
-by awaiting the builder. On the consumer side, `Client::take` returns
-a `Stream<Item = Result<Job, ZizqError>>` that yields one job at a
-time until the server disconnects or the stream is dropped.
+Returning `Ok(())` from a route acks the job; returning `Err(_)`
+reports a failure and lets the server's retry policy apply. If a job
+arrives for a type the router doesn't know about, or its payload
+doesn't deserialise into the route's input, the worker reports it as
+a failure on the same path as a handler error.
 
-### Workers (planned, design subject to change)
+### Lower-level API
 
-The current `take` + `report_success` / `report_failure` primitives
-give explicit control but require the caller to coordinate dispatch,
-concurrency, and shutdown. A higher-level `Worker` will wrap them with
-a `Router` keyed by `JobKind::NAME`, so dispatch is type-driven — no
-string matching at the call site.
-
-```rust
-use zizq::{Router, Worker};
-
-// SendEmail and a second job type, both implementing JobKind.
-#[derive(Serialize, Deserialize)]
-struct ProcessReport {
-    report_id: String,
-}
-
-impl JobKind for ProcessReport {
-    const NAME: &'static str = "process_report";
-}
-
-let worker = Worker::builder()
-    .client(client.clone())
-    .concurrency(16)
-    .handler(
-        Router::new()
-            .route(async move |job: SendEmail| {
-                // do the work — send the email
-            })
-            .route(async move |job: ProcessReport| {
-                // handle the other job type
-            }),
-    )
-    .build()?;
-
-worker.run().await?;
-```
+If you'd rather coordinate dispatch yourself, the worker is built on
+two primitives you can use directly: `Client::take` returns a
+`Stream<Item = Result<Job, ZizqError>>` and `Client::report_success` /
+`Client::report_failure` ack individually. `Worker::builder().handler`
+also accepts a closure of the form `Fn(Job) -> Fut` (the raw `Job`,
+not a typed payload) if you want the worker's concurrency and
+reconnect logic without `Router`'s type-driven dispatch.
 
 ## Resources
 

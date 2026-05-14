@@ -72,8 +72,13 @@ pub struct HandlerError {
 }
 
 impl HandlerError {
-    /// Build a `HandlerError` from ` std::error::Error`.
-    fn from_typed<E: StdError + Send + Sync + 'static>(e: E) -> Self {
+    /// Build a `HandlerError` from any `std::error::Error`. Captures
+    /// the static type name of `E` and the `Display` form of the
+    /// value. `pub(crate)` so the [`Router`] can reuse it for its
+    /// own synthesised errors.
+    ///
+    /// [`Router`]: crate::Router
+    pub(crate) fn from_typed<E: StdError + Send + Sync + 'static>(e: E) -> Self {
         Self {
             type_name: type_name::<E>(),
             message: e.to_string(),

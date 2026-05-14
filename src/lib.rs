@@ -5,8 +5,13 @@
 //!
 //! [Zizq]: https://zizq.io
 //!
-//! The client exposes a small, builder-driven API for talking to a
-//! Zizq server. At its core:
+//! Zizq is a fast and durable job queue system based on an internal
+//! LSM database, not on Redis or on your RDBMS. It provides multiple
+//! producer, multiple consumer functionality across an entire stack
+//! with producers and consumers written in any language.
+//!
+//! This client exposes a small, builder-driven API for enqueueing,
+//! processing and managing jobs on the Zizq server. At its core:
 //!
 //! - [`Client`] is the cheaply-clonable handle. Configure it once with
 //!   [`Client::builder`] and share it across tasks.
@@ -15,9 +20,12 @@
 //!   (queue, priority, retry limit, uniqueness).
 //! - [`Client::enqueue`] returns an [`EnqueueBuilder`] that chains
 //!   per-job overrides and awaits to send the request.
-//! - [`Client::take`] opens a long-lived stream of jobs to process,
-//!   acknowledged via [`Client::report_success`] (or
-//!   [`Client::report_failure`] on error).
+//! - [`Worker`] is the recommended consumer API — it streams jobs,
+//!   dispatches them to a [`JobHandler`] with bounded concurrency,
+//!   batches acks, and reconnects on transient failures. Use [`Router`]
+//!   to dispatch multiple [`JobKind`]s through one worker. For full
+//!   manual control, [`Client::take`] + [`Client::report_success`] /
+//!   [`Client::report_failure`] are the underlying primitives.
 //!
 //! The API serialization format defaults to [`Format::MessagePack`];
 //! switch to [`Format::Json`] if you prefer a human-readable payload.
@@ -26,12 +34,13 @@
 //! # Getting started
 //!
 //! Define a [`JobKind`] for each payload type your application
-//! produces or consumes. Producers enqueue, consumers stream-and-ack.
+//! produces or consumes. The producer enqueues; the consumer runs a
+//! [`Worker`] that calls your handler for each job.
 //!
 //! ```no_run
-//! use futures_util::TryStreamExt;
 //! use serde::{Deserialize, Serialize};
-//! use zizq::{Client, JobKind};
+//! use std::convert::Infallible;
+//! use zizq::{Client, JobKind, Router, Worker};
 //!
 //! #[derive(Serialize, Deserialize)]
 //! struct SendEmail {
@@ -43,6 +52,15 @@
 //!     const QUEUE: &'static str = "emails";
 //! }
 //!
+//! #[derive(Serialize, Deserialize)]
+//! struct ProcessReport {
+//!     report_id: String,
+//! }
+//!
+//! impl JobKind for ProcessReport {
+//!     const NAME: &'static str = "process_report";
+//! }
+//!
 //! /// Producer side — enqueue work.
 //! async fn produce(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
 //!     client
@@ -52,20 +70,30 @@
 //!     Ok(())
 //! }
 //!
-//! /// Consumer side — pull jobs and acknowledge them. In practice
-//! /// you'd dispatch the payload to a handler and report success
-//! /// or failure based on the result.
-//! async fn consume(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut stream = client
-//!         .take()
-//!         .queues(["emails"])
-//!         .prefetch(8)
-//!         .await?;
+//! /// Consumer side — run a worker with a router that dispatches
+//! /// by job type. For a single job type, pass a closure to
+//! /// `.handler(...)` directly instead of a `Router`.
+//! async fn consume(client: Client) -> Result<(), Box<dyn std::error::Error>> {
+//!     let worker = Worker::builder()
+//!         .client(client)
+//!         .concurrency(16)
+//!         .handler(
+//!             Router::new()
+//!                 .route(async |job: SendEmail| {
+//!                     // ... send the email ...
+//!                     Ok::<(), Infallible>(())
+//!                 })
+//!                 .route(async |job: ProcessReport| {
+//!                     // ... process the report ...
+//!                     Ok::<(), Infallible>(())
+//!                 }),
+//!         )
+//!         .build()?;
 //!
-//!     while let Some(job) = stream.try_next().await? {
-//!         // ... do the work ...
-//!         client.report_success(&job.id).await?;
-//!     }
+//!     // In production, wire `shutdown` to `tokio::signal::ctrl_c()`
+//!     // or a `CancellationToken`. `pending()` here means "run until
+//!     // the take stream ends or the process is killed".
+//!     worker.run(std::future::pending::<()>()).await?;
 //!     Ok(())
 //! }
 //!
@@ -75,7 +103,7 @@
 //!     .build()?;
 //!
 //! produce(&client).await?;
-//! consume(&client).await?;
+//! consume(client).await?;
 //! # Ok(()) }
 //! ```
 
@@ -86,6 +114,7 @@ mod failure;
 mod format;
 mod job;
 mod resources;
+mod router;
 mod take;
 mod timestamp;
 mod unique_key;
@@ -98,6 +127,7 @@ pub use failure::FailureBuilder;
 pub use format::Format;
 pub use job::JobKind;
 pub use resources::{BackoffConfig, Job, JobStatus, RetentionConfig};
+pub use router::Router;
 pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};
 pub use worker::{HandlerError, JobHandler, Worker, WorkerBuilder};

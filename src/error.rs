@@ -51,4 +51,20 @@ pub enum ZizqError {
     /// [`Format`]: crate::Format
     #[error("failed to deserialize response: {0}")]
     Decode(String),
+
+    /// The [`WorkerBuilder`] was finalised without calling
+    /// [`WorkerBuilder::client`].
+    ///
+    /// [`WorkerBuilder`]: crate::WorkerBuilder
+    /// [`WorkerBuilder::client`]: crate::WorkerBuilder::client
+    #[error("worker client is required")]
+    MissingClient,
+
+    /// The [`WorkerBuilder`] was finalised without calling
+    /// [`WorkerBuilder::handler`].
+    ///
+    /// [`WorkerBuilder`]: crate::WorkerBuilder
+    /// [`WorkerBuilder::handler`]: crate::WorkerBuilder::handler
+    #[error("worker handler is required")]
+    MissingHandler,
 }

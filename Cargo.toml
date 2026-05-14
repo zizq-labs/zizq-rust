@@ -22,10 +22,13 @@ url = "2"
 time = { version = "0.3", features = ["serde", "macros"] }
 bytes = "1"
 futures-core = "0.3"
+futures-util = "0.3"
+log = "0.4"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server", "tokio"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
 http-body-util = "0.1"
 futures-util = "0.3"

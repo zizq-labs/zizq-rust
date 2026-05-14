@@ -47,7 +47,7 @@ fn msgpack_heartbeat() -> [u8; 4] {
 
 #[tokio::test]
 async fn take_request_uses_get_and_correct_path_with_query_params() {
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/vnd.zizq.msgpack-stream", Vec::new())
         .await;
@@ -81,7 +81,7 @@ async fn take_request_uses_get_and_correct_path_with_query_params() {
 
 #[tokio::test]
 async fn take_with_no_filters_sends_no_query_params() {
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/vnd.zizq.msgpack-stream", Vec::new())
         .await;
@@ -96,7 +96,7 @@ async fn take_with_no_filters_sends_no_query_params() {
 
 #[tokio::test]
 async fn take_surfaces_non_2xx_on_connect_as_response_error() {
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_json(403, json!({ "error": "forbidden" }))
         .await;
@@ -125,7 +125,7 @@ async fn iterates_jobs_from_ndjson_stream_with_heartbeats() {
     body.extend_from_slice(&ndjson_line(&fake_job("job-3")));
     body.push(b'\n'); // heartbeat
 
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/x-ndjson", body)
         .await;
@@ -157,7 +157,7 @@ async fn iterates_jobs_from_msgpack_stream_with_heartbeats() {
     body.extend_from_slice(&msgpack_heartbeat());
     body.extend_from_slice(&msgpack_frame(&fake_job("job-2")));
 
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/vnd.zizq.msgpack-stream", body)
         .await;
@@ -183,7 +183,7 @@ async fn parser_is_selected_from_response_content_type_not_request() {
     let mut body = Vec::new();
     body.extend_from_slice(&ndjson_line(&fake_job("job-1")));
 
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/x-ndjson", body)
         .await;
@@ -201,7 +201,7 @@ async fn parser_is_selected_from_response_content_type_not_request() {
 
 #[tokio::test]
 async fn empty_stream_terminates_with_none() {
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/vnd.zizq.msgpack-stream", Vec::new())
         .await;
@@ -217,7 +217,7 @@ async fn trailing_partial_frame_surfaces_as_decode_error() {
     // Header says 99 bytes of payload but the server only sends 2.
     let body = vec![0, 0, 0, 99, 1, 2];
 
-    let server = MockServer::start_http1().await;
+    let server = MockServer::start().await;
     server
         .set_response_raw(200, "application/vnd.zizq.msgpack-stream", body)
         .await;

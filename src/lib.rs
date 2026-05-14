@@ -89,6 +89,7 @@ mod resources;
 mod take;
 mod timestamp;
 mod unique_key;
+mod worker;
 
 pub use client::{Client, ClientBuilder};
 pub use enqueue::EnqueueBuilder;
@@ -99,3 +100,4 @@ pub use job::JobKind;
 pub use resources::{BackoffConfig, Job, JobStatus, RetentionConfig};
 pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};
+pub use worker::{HandlerError, JobHandler, Worker, WorkerBuilder};

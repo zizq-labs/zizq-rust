@@ -257,6 +257,50 @@ impl Client {
         FailureBuilder::new(self, id.into(), message.into())
     }
 
+    /// Fetch a single job by id.
+    ///
+    /// Returns the [`Job`] on success. A job that doesn't exist (e.g.
+    /// already deleted, purged, or never enqueued) surfaces as
+    /// [`ZizqError::Response`] with `status: 404`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, ZizqError};
+    /// # async fn run(client: &Client, job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// match client.get_job(job_id).await {
+    ///     Ok(job) => println!("found {} on {}", job.id, job.queue),
+    ///     Err(ZizqError::Response { status: 404, .. }) => println!("not found"),
+    ///     Err(e) => return Err(e.into()),
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_job(&self, id: &str) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id]);
+        let response = self.send(reqwest::Method::GET, url, None).await?;
+        self.parse_job_response(response).await
+    }
+
+    /// Permanently remove a job from the server.
+    ///
+    /// A job that doesn't exist surfaces as [`ZizqError::Response`] with
+    /// `status: 404`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client, job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// client.delete_job(job_id).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn delete_job(&self, id: &str) -> Result<(), ZizqError> {
+        let url = self.url(&["jobs", id]);
+        let response = self.send(reqwest::Method::DELETE, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
+            .await
+    }
+
     /// Begin streaming jobs from the server. Returns a [`TakeBuilder`]
     /// that chains optional filters (`.queues(...)`, `.prefetch(...)`)
     /// and is awaited to open the connection.

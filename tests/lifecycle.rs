@@ -263,6 +263,114 @@ async fn report_failure_does_not_emit_kill_when_false() {
     assert!(parsed.get("kill").is_none());
 }
 
+// --- get_job --------------------------------------------------------------
+
+#[tokio::test]
+async fn get_job_returns_the_job_on_200() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(200, &fake_job_response("job-g1", "emails", "ready", 0))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let job = client.get_job("job-g1").await.unwrap();
+
+    assert_eq!(job.id, "job-g1");
+    assert_eq!(job.queue, "emails");
+    assert_eq!(job.status, JobStatus::Ready);
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "GET");
+    assert_eq!(req.path, "/jobs/job-g1");
+    assert!(req.body.is_empty());
+}
+
+#[tokio::test]
+async fn get_job_percent_encodes_job_id() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(200, &fake_job_response("ns/abc", "emails", "ready", 0))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    // Slash in the id would split routing on the server side without
+    // percent-encoding.
+    client.get_job("ns/abc").await.unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.path, "/jobs/ns%2Fabc");
+}
+
+#[tokio::test]
+async fn get_job_surfaces_404_as_response_error() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(404, json!({ "error": "job not found" }))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let err = client.get_job("missing").await.unwrap_err();
+
+    match err {
+        ZizqError::Response { status, message } => {
+            assert_eq!(status, 404);
+            assert_eq!(message, "job not found");
+        }
+        other => panic!("expected Response error, got {other:?}"),
+    }
+}
+
+// --- delete_job -----------------------------------------------------------
+
+#[tokio::test]
+async fn delete_job_returns_unit_on_204() {
+    let server = MockServer::start().await;
+    server
+        .set_response_raw(204, "application/msgpack", Vec::new())
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    client.delete_job("job-d1").await.unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "DELETE");
+    assert_eq!(req.path, "/jobs/job-d1");
+    assert!(req.body.is_empty());
+}
+
+#[tokio::test]
+async fn delete_job_percent_encodes_job_id() {
+    let server = MockServer::start().await;
+    server
+        .set_response_raw(204, "application/msgpack", Vec::new())
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    client.delete_job("ns/abc").await.unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.path, "/jobs/ns%2Fabc");
+}
+
+#[tokio::test]
+async fn delete_job_surfaces_404_as_response_error() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(404, json!({ "error": "job not found" }))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let err = client.delete_job("missing").await.unwrap_err();
+
+    match err {
+        ZizqError::Response { status, message } => {
+            assert_eq!(status, 404);
+            assert_eq!(message, "job not found");
+        }
+        other => panic!("expected Response error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn report_failure_surfaces_404_as_response_error() {
     let server = MockServer::start().await;

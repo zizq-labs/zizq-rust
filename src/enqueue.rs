@@ -72,7 +72,7 @@ pub struct EnqueueBuilder<'a, T> {
     queue: Option<String>,
 
     /// Priority within the queue. Lower values run sooner.
-    priority: Option<u32>,
+    priority: Option<u16>,
 
     /// Optional time at which the job becomes ready, as Unix ms.
     ///
@@ -101,8 +101,8 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
     }
 
     /// Override the priority. Lower values run sooner. Valid range is
-    /// 0 to 65536. Overrides [`JobKind::PRIORITY`].
-    pub fn priority(mut self, priority: u32) -> Self {
+    /// 0 to 65535. Overrides [`JobKind::PRIORITY`].
+    pub fn priority(mut self, priority: u16) -> Self {
         self.priority = Some(priority);
         self
     }
@@ -239,7 +239,7 @@ mod tests {
     impl JobKind for SendEmail {
         const NAME: &'static str = "send_email";
         const QUEUE: &'static str = "emails";
-        const PRIORITY: Option<u32> = Some(50);
+        const PRIORITY: Option<u16> = Some(50);
     }
 
     #[derive(Debug, Serialize, Deserialize)]

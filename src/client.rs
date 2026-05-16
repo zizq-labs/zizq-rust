@@ -883,7 +883,7 @@ pub(crate) struct EnqueueRequest {
 
     /// Job priority. Lower values run sooner.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) priority: Option<u32>,
+    pub(crate) priority: Option<u16>,
 
     /// Optional timestamp at which this job becomes ready to run.
     #[serde(skip_serializing_if = "Option::is_none")]

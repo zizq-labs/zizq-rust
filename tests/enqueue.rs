@@ -22,7 +22,7 @@ struct SendEmail {
 impl JobKind for SendEmail {
     const NAME: &'static str = "send_email";
     const QUEUE: &'static str = "emails";
-    const PRIORITY: Option<u32> = Some(50);
+    const PRIORITY: Option<u16> = Some(50);
 }
 
 #[derive(Debug, Serialize, Deserialize)]

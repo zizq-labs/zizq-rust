@@ -50,7 +50,7 @@ use crate::unique_key::UniqueKey;
 /// impl JobKind for SendEmail {
 ///     const NAME: &'static str = "send_email";
 ///     const QUEUE: &'static str = "emails";
-///     const PRIORITY: Option<u32> = Some(50);
+///     const PRIORITY: Option<u16> = Some(50);
 ///
 ///     fn unique_key(&self) -> Option<UniqueKey> {
 ///         Some(UniqueKey::raw(format!("send_email:{}", self.to)))
@@ -69,9 +69,9 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + 'static {
     const QUEUE: &'static str = "default";
 
     /// Default priority used when none is specified at the call site.
-    /// Lower values run sooner. Valid range is 0 to 65536; `None` lets
+    /// Lower values run sooner. Valid range is 0 to 65535; `None` lets
     /// the server apply its own default (typically `32768`).
-    const PRIORITY: Option<u32> = None;
+    const PRIORITY: Option<u16> = None;
 
     /// Default retry budget used when none is specified at the call
     /// site. `None` lets the server apply its own default.

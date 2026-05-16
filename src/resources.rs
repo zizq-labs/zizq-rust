@@ -170,8 +170,8 @@ pub struct Job {
     pub status: JobStatus,
 
     /// Priority within the queue. Lower values run sooner. Valid range
-    /// is 0 to 65536; the server default is 32768.
-    pub priority: u32,
+    /// is 0 to 65535; the server default is 32768.
+    pub priority: u16,
 
     /// Arbitrary payload supplied by the enqueuer.
     ///
@@ -243,7 +243,7 @@ struct JobFromApi {
     status: JobStatus,
 
     /// Priority within the queue. Lower values run sooner.
-    priority: u32,
+    priority: u16,
     #[serde(default)]
 
     /// Arbitrary payload supplied by the enqueuer.

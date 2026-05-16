@@ -57,7 +57,7 @@ struct SendEmail {
 impl JobKind for SendEmail {
     const NAME: &'static str = "send_email";
     const QUEUE: &'static str = "emails";
-    const PRIORITY: Option<u32> = Some(100);
+    const PRIORITY: Option<u16> = Some(100);
 }
 
 #[tokio::main]

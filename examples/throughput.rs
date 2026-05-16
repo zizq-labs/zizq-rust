@@ -27,9 +27,11 @@
 use std::convert::Infallible;
 use std::env;
 use std::error::Error;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use zizq::{Client, Format, JobKind, Router, Worker};
@@ -93,6 +95,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Enqueued {} jobs in {:.2}s ({} jobs/sec)",
         job_count, enqueue_elapsed, enqueue_rate,
+    );
+
+    // --- Scan phase ---
+    //
+    // Read every job back through the list stream, read-only. Runs
+    // *before* the dequeue phase, while all N jobs are still present
+    // (the dequeue phase completes them, after which they're no
+    // longer listed). This isolates response deserialization cost:
+    // there's no handler dispatch, no ack traffic, no worker plumbing
+    // — just paginated GETs and decoding. `limit(2000)` (the server
+    // max) keeps the round-trip count low so per-page decode
+    // dominates the timing.
+
+    let scan_start = Instant::now();
+    let mut scanned = 0u64;
+    let mut jobs = client.list_jobs().limit(2000).stream();
+    while let Some(job) = jobs.try_next().await? {
+        // Deserialize the payload into the typed `Bench`. This is the
+        // second walk (`Value` tree -> `T`) that `Router` performs on
+        // every dispatched job, so the scan now reflects the full
+        // decode cost a real worker pays. `black_box` keeps the
+        // optimiser from discarding the result as dead code.
+        let bench: Bench =
+            serde_json::from_value(job.payload.expect("bench jobs always carry a payload"))?;
+        black_box(&bench);
+        scanned += 1;
+    }
+
+    let scan_elapsed = scan_start.elapsed().as_secs_f64();
+    let scan_rate = (scanned as f64 / scan_elapsed).round() as u64;
+    println!(
+        "Scanned {} jobs in {:.2}s ({} jobs/sec)",
+        scanned, scan_elapsed, scan_rate,
     );
 
     // --- Dequeue phase ---

@@ -4,8 +4,9 @@
 mod common;
 
 use common::MockServer;
+use futures_util::TryStreamExt;
 use serde_json::json;
-use zizq::{Client, Format, JobPage, JobStatus, Order, ZizqError};
+use zizq::{Client, Format, Job, JobPage, JobStatus, Order, ZizqError};
 
 fn fake_job(id: &str, queue: &str, status: &str) -> serde_json::Value {
     json!({
@@ -184,6 +185,88 @@ async fn get_page_follows_a_relative_path() {
     let req = server.last_request().await;
     assert_eq!(req.method, "GET");
     assert_eq!(req.path, "/jobs?from=job-1");
+}
+
+#[tokio::test]
+async fn stream_paginates_across_pages() {
+    let server = MockServer::start().await;
+    // The mock routes by path only (ignoring the query string), and
+    // both the first request (`/jobs`) and the follow-up
+    // (`/jobs?from=j2`) share the path `/jobs` — so a response
+    // *sequence* keyed on `/jobs` serves page 1 then page 2 in order.
+    server
+        .set_response_sequence_for(
+            "GET",
+            "/jobs",
+            vec![
+                (
+                    200,
+                    "application/json",
+                    serde_json::to_vec(&page_response(
+                        &[("j1", "emails", "ready"), ("j2", "emails", "ready")],
+                        Some("/jobs?from=j2"),
+                        None,
+                    ))
+                    .unwrap(),
+                ),
+                (
+                    200,
+                    "application/json",
+                    serde_json::to_vec(&page_response(
+                        &[("j3", "emails", "ready")],
+                        None,
+                        Some("/jobs"),
+                    ))
+                    .unwrap(),
+                ),
+            ],
+        )
+        .await;
+
+    let client = Client::builder()
+        .url(&server.url)
+        .format(Format::Json)
+        .build()
+        .unwrap();
+    let jobs: Vec<Job> = client.list_jobs().stream().try_collect().await.unwrap();
+
+    assert_eq!(
+        jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+        ["j1", "j2", "j3"],
+    );
+
+    // Two pages fetched: the first URL and the `next` path.
+    let paths: Vec<String> = server
+        .requests()
+        .await
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    assert_eq!(paths, ["/jobs", "/jobs?from=j2"]);
+}
+
+#[tokio::test]
+async fn stream_empty_filter_yields_nothing_without_request() {
+    let server = MockServer::start().await;
+
+    let client = Client::builder()
+        .url(&server.url)
+        .format(Format::Json)
+        .build()
+        .unwrap();
+    let jobs: Vec<Job> = client
+        .list_jobs()
+        .status([])
+        .stream()
+        .try_collect()
+        .await
+        .unwrap();
+
+    assert!(jobs.is_empty());
+    assert!(
+        server.requests().await.is_empty(),
+        "empty-filter stream should make no request",
+    );
 }
 
 #[tokio::test]

@@ -21,12 +21,14 @@
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 
+use futures_core::Stream;
+use futures_util::stream::try_unfold;
 use url::Url;
 
 use crate::client::Client;
 use crate::error::ZizqError;
 use crate::job_filter::{job_filter_setters, JobFilter};
-use crate::resources::JobPage;
+use crate::resources::{Job, JobPage};
 
 /// Sort order for [`ListJobsBuilder`] results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,9 +128,85 @@ impl<'a> ListJobsBuilder<'a> {
 
     /// Maximum number of jobs to return on this page. Valid range is
     /// 1–2000; the server's default is 50.
+    ///
+    /// When used with [`Self::stream`], this is the *per-page* fetch
+    /// size — larger pages mean fewer round trips.
     pub fn limit(mut self, n: u16) -> Self {
         self.limit = Some(n);
         self
+    }
+
+    /// Stream every matching job, fetching pages lazily.
+    ///
+    /// Returns a [`Stream`] of `Result<Job, ZizqError>` that fetches
+    /// the first page on first poll and follows each page's `next`
+    /// link until the result set is exhausted. Only one page is held
+    /// in memory at a time. A transport / decode error ends the
+    /// stream after yielding the error.
+    ///
+    /// If a filter is explicitly set to an empty set, the stream
+    /// yields nothing and makes no request — consistent with
+    /// `.await`ing the builder.
+    ///
+    /// Consuming the stream needs [`futures_util::StreamExt`] /
+    /// `TryStreamExt` in scope.
+    ///
+    /// [`futures_util::StreamExt`]: https://docs.rs/futures-util/latest/futures_util/stream/trait.StreamExt.html
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use futures_util::TryStreamExt;
+    /// # use zizq::{Client, JobStatus};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut jobs = client
+    ///     .list_jobs()
+    ///     .status([JobStatus::Dead])
+    ///     .limit(2000)
+    ///     .stream();
+    ///
+    /// while let Some(job) = jobs.try_next().await? {
+    ///     println!("{} on {}", job.id, job.queue);
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn stream(self) -> Pin<Box<dyn Stream<Item = Result<Job, ZizqError>> + Send + 'a>> {
+        let cursor = if self.filters.matches_nothing() {
+            PageCursor::Done
+        } else {
+            PageCursor::First(self.build_url())
+        };
+        let state = JobStreamState {
+            client: self.client,
+            buffer: Vec::new().into_iter(),
+            cursor,
+        };
+        // Boxed so the returned stream is `Unpin` — `try_unfold`'s
+        // own type holds a non-`Unpin` future, which would otherwise
+        // force callers to `pin!` it before using `StreamExt`.
+        Box::pin(try_unfold(state, |mut state| async move {
+            loop {
+                // Yield buffered jobs from the current page first.
+                if let Some(job) = state.buffer.next() {
+                    return Ok(Some((job, state)));
+                }
+                // Buffer drained — fetch the next page (or stop).
+                // The std::mem::replace here is so we can atomically get
+                // the current cursor as an owned value. It is replaced
+                // with Done largely arbitrarily simply to push the
+                // existing value out. We set a new cursor shortly after.
+                let page = match std::mem::replace(&mut state.cursor, PageCursor::Done) {
+                    PageCursor::First(url) => state.client.get_decoded::<JobPage>(url).await?,
+                    PageCursor::Next(path) => state.client.get_page::<JobPage>(&path).await?,
+                    PageCursor::Done => return Ok(None),
+                };
+                state.buffer = page.jobs.into_iter();
+                state.cursor = match page.pages.next {
+                    Some(path) => PageCursor::Next(path),
+                    None => PageCursor::Done,
+                };
+            }
+        }))
     }
 
     /// Build the request URL with filter / paging query parameters.
@@ -175,6 +253,24 @@ impl<'a> IntoFuture for ListJobsBuilder<'a> {
             client.get_decoded::<JobPage>(url).await
         })
     }
+}
+
+/// Where the job stream fetches its next page from.
+enum PageCursor {
+    /// First page — fetch this fully-built URL (filters + paging).
+    First(Url),
+    /// Subsequent page — follow this server-emitted `next` path.
+    Next(String),
+    /// Result set exhausted (or an empty filter matched nothing).
+    Done,
+}
+
+/// `try_unfold` state for the job stream: the client handle, the
+/// remaining jobs of the current page, and the cursor to the next.
+struct JobStreamState<'a> {
+    client: &'a Client,
+    buffer: std::vec::IntoIter<Job>,
+    cursor: PageCursor,
 }
 
 #[cfg(test)]

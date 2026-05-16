@@ -18,6 +18,7 @@ use url::Url;
 
 use crate::bulk_enqueue::BulkEnqueueBuilder;
 use crate::count_jobs::CountJobsBuilder;
+use crate::delete_jobs::DeleteJobsBuilder;
 use crate::enqueue::EnqueueBuilder;
 use crate::error::ZizqError;
 use crate::failure::FailureBuilder;
@@ -340,6 +341,35 @@ impl Client {
         CountJobsBuilder::new(self)
     }
 
+    /// Begin a bulk `DELETE /jobs`. Returns a [`DeleteJobsBuilder`]
+    /// that accumulates job-selection filters and is awaited to
+    /// permanently delete every matching job, returning the count
+    /// removed.
+    ///
+    /// **Destructive.** Awaited with no filters, this deletes *every
+    /// job on the server* — hence the name. A filter set to an
+    /// explicitly empty set (e.g. `.status([])`) instead deletes
+    /// nothing and makes no request.
+    ///
+    /// Shares the filter set (`status`, `queue`, `type`, `id`,
+    /// `filter`) with [`Client::list_jobs`] and [`Client::count_jobs`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, JobStatus};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let removed = client
+    ///     .delete_all_jobs()
+    ///     .status([JobStatus::Dead])
+    ///     .await?;
+    /// println!("deleted {removed} dead jobs");
+    /// # Ok(()) }
+    /// ```
+    pub fn delete_all_jobs(&self) -> DeleteJobsBuilder<'_> {
+        DeleteJobsBuilder::new(self)
+    }
+
     /// Follow a server-emitted pagination path (e.g.
     /// [`PageLinks::next`]) and decode the response as `T`.
     ///
@@ -556,7 +586,26 @@ impl Client {
 
     /// GET the given URL and decode the response body as `T`.
     pub(crate) async fn get_decoded<T: DeserializeOwned>(&self, url: Url) -> Result<T, ZizqError> {
-        let response = self.send(reqwest::Method::GET, url, None).await?;
+        self.send_decoded(reqwest::Method::GET, url).await
+    }
+
+    /// DELETE the given URL and decode the response body as `T`.
+    pub(crate) async fn delete_decoded<T: DeserializeOwned>(
+        &self,
+        url: Url,
+    ) -> Result<T, ZizqError> {
+        self.send_decoded(reqwest::Method::DELETE, url).await
+    }
+
+    /// Issue a bodyless request and decode the response body as `T`.
+    /// The shared transport behind [`Client::get_decoded`] /
+    /// [`Client::delete_decoded`].
+    async fn send_decoded<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> Result<T, ZizqError> {
+        let response = self.send(method, url, None).await?;
         let status = response.status();
         let format = self.response_format(&response);
         let body_bytes = response.bytes().await?;

@@ -110,6 +110,7 @@
 mod bulk_enqueue;
 mod client;
 mod count_jobs;
+mod delete_jobs;
 mod enqueue;
 mod error;
 mod failure;
@@ -127,6 +128,7 @@ mod worker;
 pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};
 pub use count_jobs::CountJobsBuilder;
+pub use delete_jobs::DeleteJobsBuilder;
 pub use enqueue::EnqueueBuilder;
 pub use error::ZizqError;
 pub use failure::FailureBuilder;

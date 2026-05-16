@@ -183,7 +183,7 @@ pub struct Worker {
     /// will send before pausing. Resolved at build time — defaults to
     /// `concurrency` if not explicitly set, so dispatch isn't
     /// accidentally serialised by the server's own default of 1.
-    prefetch: u32,
+    prefetch: usize,
     /// True if the worker should automatically reconnect on transient
     /// connection failures.
     reconnect: bool,
@@ -224,7 +224,7 @@ impl Worker {
     pub async fn run(self, shutdown: impl Future<Output = ()> + Send) -> Result<(), ZizqError> {
         let mut shutdown = Box::pin(shutdown);
         let mut inflight: JoinSet<()> = JoinSet::new();
-        let (ack_tx, ack_rx) = mpsc::channel::<String>(self.concurrency * 2);
+        let (ack_tx, ack_rx) = mpsc::channel::<String>(self.prefetch * 2);
         let ack_handle = tokio::spawn(ack_processor(self.client.clone(), ack_rx));
 
         let (stream, result) = self
@@ -429,7 +429,7 @@ pub struct WorkerBuilder {
     /// concurrency. This should never be set to a value
     /// lower than the concurrency as doing so holds back
     /// jobs.
-    prefetch: Option<u32>,
+    prefetch: Option<usize>,
     /// True if the worker should auto-reconnect on transient
     /// connection failures.
     reconnect: bool,
@@ -505,7 +505,7 @@ impl WorkerBuilder {
     pub fn concurrency(mut self, n: usize) -> Self {
         self.concurrency = n.max(1);
         if self.prefetch.is_none() {
-            self.prefetch = Some(self.concurrency as u32);
+            self.prefetch = Some(self.concurrency);
         }
         self
     }
@@ -531,7 +531,7 @@ impl WorkerBuilder {
     /// this value higher than `concurrency` holds a buffer of jobs in
     /// memory so work is immediately available without an I/O trip
     /// after each task completes.
-    pub fn prefetch(mut self, n: u32) -> Self {
+    pub fn prefetch(mut self, n: usize) -> Self {
         self.prefetch = Some(n);
         self
     }
@@ -571,7 +571,7 @@ impl WorkerBuilder {
         // prefetch fallback catches the "neither .concurrency() nor
         // .prefetch() was called" case — when .concurrency(n) is called
         // it eagerly sets prefetch=Some(n).
-        let prefetch = self.prefetch.unwrap_or(self.concurrency as u32);
+        let prefetch = self.prefetch.unwrap_or(self.concurrency);
 
         Ok(Worker {
             client,

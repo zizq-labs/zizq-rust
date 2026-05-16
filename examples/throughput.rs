@@ -60,9 +60,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let concurrency: usize = env::var("CONCURRENCY").as_deref().unwrap_or("25").parse()?;
 
-    let prefetch: u32 = match env::var("PREFETCH") {
+    let prefetch: usize = match env::var("PREFETCH") {
         Ok(s) => s.parse()?,
-        Err(_) => (concurrency * 2) as u32,
+        Err(_) => concurrency * 2,
     };
 
     let client = Client::builder().url(&url).format(format).build()?;
@@ -110,7 +110,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let scan_start = Instant::now();
     let mut scanned = 0u64;
-    let mut jobs = client.list_jobs().limit(2000).stream();
+    let mut jobs = client
+        .list_jobs()
+        .queue(vec![Bench::QUEUE])
+        .limit(2000)
+        .stream();
     while let Some(job) = jobs.try_next().await? {
         // Deserialize the payload into the typed `Bench`. This is the
         // second walk (`Value` tree -> `T`) that `Router` performs on
@@ -147,6 +151,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .client(client.clone())
         .concurrency(concurrency)
         .prefetch(prefetch)
+        .queues(vec![Bench::QUEUE])
         .handler(Router::new().route({
             let shutdown = shutdown.clone();
             move |job: Bench| {

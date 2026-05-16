@@ -70,7 +70,7 @@ pub struct TakeBuilder<'a> {
     /// Maximum number of in-flight, unacknowledged jobs the server
     /// will send. `None` is the server’s default of 1 (job must be ack'd
     /// before another job is sent).
-    prefetch: Option<u32>,
+    prefetch: Option<usize>,
 }
 
 impl<'a> TakeBuilder<'a> {
@@ -90,7 +90,7 @@ impl<'a> TakeBuilder<'a> {
     /// unacknowledged jobs the server will send before pausing. `None`
     /// (the default) is the server’s default limit of 1, meaning each
     /// job must be acknowledged before the next is sent.
-    pub fn prefetch(mut self, n: u32) -> Self {
+    pub fn prefetch(mut self, n: usize) -> Self {
         self.prefetch = Some(n);
         self
     }

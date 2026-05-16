@@ -495,7 +495,7 @@ impl Client {
     pub(crate) async fn take_raw(
         &self,
         queues: Vec<String>,
-        prefetch: Option<u32>,
+        prefetch: Option<usize>,
     ) -> Result<TakeStream, ZizqError> {
         let mut url = self.url(&["jobs", "take"]);
         // Only touch query_pairs_mut when we have params to add;
@@ -503,8 +503,11 @@ impl Client {
         // even when no pairs are appended.
         if !queues.is_empty() || prefetch.is_some() {
             let mut q = url.query_pairs_mut();
-            for queue in &queues {
-                q.append_pair("queues", queue);
+            // The server's take endpoint takes a single comma-delimited
+            // `queue` param (a `CommaSet`), not a repeated `queues`
+            // pair — and rejects unknown fields outright.
+            if !queues.is_empty() {
+                q.append_pair("queue", &queues.join(","));
             }
             if let Some(p) = prefetch {
                 q.append_pair("prefetch", &p.to_string());

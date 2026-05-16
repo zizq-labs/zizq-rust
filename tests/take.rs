@@ -67,9 +67,9 @@ async fn take_request_uses_get_and_correct_path_with_query_params() {
         "expected /jobs/take path, got {}",
         req.path
     );
-    // Multiple queues serialise as repeated params.
-    assert!(req.path.contains("queues=emails"));
-    assert!(req.path.contains("queues=urgent"));
+    // Multiple queues serialise as a single comma-delimited `queue`
+    // param (the server's `CommaSet`); the comma is URL-encoded.
+    assert!(req.path.contains("queue=emails%2Curgent"));
     assert!(req.path.contains("prefetch=16"));
     // Streaming endpoint uses its own Accept type, distinct from the
     // request/response one.

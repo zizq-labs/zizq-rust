@@ -29,6 +29,16 @@ pub enum JobStatus {
 
     /// Exhausted its retry budget without succeeding.
     Dead,
+
+    /// A status this client version doesn't recognise — e.g. a newer
+    /// server introduced a status the client predates.
+    ///
+    /// The catch-all keeps an unknown status from failing the whole
+    /// [`Job`] decode (and cascading to a failed `list_jobs` page or
+    /// take-stream frame), so older clients keep working against
+    /// newer servers.
+    #[serde(other)]
+    Unknown,
 }
 
 impl JobStatus {
@@ -42,6 +52,11 @@ impl JobStatus {
             Self::Scheduled => "scheduled",
             Self::Completed => "completed",
             Self::Dead => "dead",
+            // `Unknown` only ever arises from deserialising a status
+            // this client doesn't know — it should never be used as a
+            // filter. If one somehow is, the server rejects the query
+            // loudly rather than silently mis-filtering.
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -307,5 +322,42 @@ impl From<JobFromApi> for Job {
             unique_key,
             duplicate: w.duplicate,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_status_deserialises() {
+        let s: JobStatus = serde_json::from_str("\"in_flight\"").unwrap();
+        assert_eq!(s, JobStatus::InFlight);
+    }
+
+    #[test]
+    fn unknown_status_falls_back_to_unknown() {
+        // A status this client version doesn't know lands on the
+        // `Unknown` catch-all instead of erroring.
+        let s: JobStatus = serde_json::from_str("\"blocked\"").unwrap();
+        assert_eq!(s, JobStatus::Unknown);
+    }
+
+    #[test]
+    fn job_with_unknown_status_still_decodes() {
+        // The catch-all must keep an unknown status from failing the
+        // whole `Job` decode.
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "id": "job-1",
+            "type": "send_email",
+            "queue": "emails",
+            "status": "blocked",
+            "priority": 50,
+            "ready_at": 0,
+            "attempts": 0,
+        }))
+        .unwrap();
+        assert_eq!(job.status, JobStatus::Unknown);
+        assert_eq!(job.id, "job-1");
     }
 }

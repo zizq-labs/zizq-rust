@@ -102,6 +102,18 @@ pub enum UniqueScope {
     /// the server (i.e. until it is reaped, according to the retention
     /// policy).
     Exists,
+
+    /// A scope this client version doesn't recognise — e.g. a newer
+    /// server introduced a scope the client predates.
+    ///
+    /// The catch-all keeps an unknown scope from failing the whole
+    /// [`Job`] decode, so older clients keep working against newer
+    /// servers. Treat it as opaque — don't round-trip it back as a
+    /// uniqueness scope on a new enqueue.
+    ///
+    /// [`Job`]: crate::Job
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -125,5 +137,19 @@ mod tests {
     fn scope_attaches() {
         let k = UniqueKey::raw("abc").scope(UniqueScope::Exists);
         assert_eq!(k.scope, Some(UniqueScope::Exists));
+    }
+
+    #[test]
+    fn known_scope_deserialises() {
+        let s: UniqueScope = serde_json::from_str("\"active\"").unwrap();
+        assert_eq!(s, UniqueScope::Active);
+    }
+
+    #[test]
+    fn unknown_scope_falls_back_to_unknown() {
+        // A scope this client version doesn't know must not fail the
+        // decode — it lands on the `Unknown` catch-all.
+        let s: UniqueScope = serde_json::from_str("\"some_future_scope\"").unwrap();
+        assert_eq!(s, UniqueScope::Unknown);
     }
 }

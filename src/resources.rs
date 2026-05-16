@@ -31,6 +31,69 @@ pub enum JobStatus {
     Dead,
 }
 
+impl JobStatus {
+    /// API-serialized format name. Used when building query strings for the
+    /// list/count endpoints, which accept status filters as a
+    /// comma-delimited list of these names.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::InFlight => "in_flight",
+            Self::Scheduled => "scheduled",
+            Self::Completed => "completed",
+            Self::Dead => "dead",
+        }
+    }
+}
+
+/// One page of jobs returned by [`Client::list_jobs`].
+///
+/// Follow [`pages.next`](PageLinks::next) (or `.prev`) via
+/// [`Client::get_page`] to navigate.
+///
+/// [`Client::list_jobs`]: crate::Client::list_jobs
+/// [`Client::get_page`]: crate::Client::get_page
+#[derive(Debug, Clone, Deserialize)]
+pub struct JobPage {
+    /// Jobs on this page, in the requested order.
+    pub jobs: Vec<Job>,
+
+    /// Pagination cursors as server-emitted paths.
+    pub pages: PageLinks,
+}
+
+impl JobPage {
+    /// A synthetic empty page. Returned by [`Client::list_jobs`] when
+    /// a filter is explicitly set to an empty set — which can match no
+    /// jobs — so no request is sent. `pages.next` / `pages.prev` are
+    /// `None`.
+    ///
+    /// [`Client::list_jobs`]: crate::Client::list_jobs
+    pub(crate) fn empty() -> Self {
+        Self {
+            jobs: Vec::new(),
+            pages: PageLinks {
+                next: None,
+                prev: None,
+            },
+        }
+    }
+}
+
+/// Pagination links emitted by listing endpoints — server-side paths
+/// (no host) suitable for [`Client::get_page`].
+///
+/// [`Client::get_page`]: crate::Client::get_page
+#[derive(Debug, Clone, Deserialize)]
+pub struct PageLinks {
+    /// Path to follow for the next page, or `None` at the end of the
+    /// result set.
+    pub next: Option<String>,
+
+    /// Path to follow for the previous page, or `None` at the start.
+    pub prev: Option<String>,
+}
+
 /// Per-job backoff configuration controlling the retry delay curve.
 ///
 /// The delay applied before a retry is computed as:

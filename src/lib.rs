@@ -109,11 +109,14 @@
 
 mod bulk_enqueue;
 mod client;
+mod count_jobs;
 mod enqueue;
 mod error;
 mod failure;
 mod format;
 mod job;
+mod job_filter;
+mod list_jobs;
 mod resources;
 mod router;
 mod take;
@@ -123,12 +126,14 @@ mod worker;
 
 pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};
+pub use count_jobs::CountJobsBuilder;
 pub use enqueue::EnqueueBuilder;
 pub use error::ZizqError;
 pub use failure::FailureBuilder;
 pub use format::Format;
 pub use job::JobKind;
-pub use resources::{BackoffConfig, Job, JobStatus, RetentionConfig};
+pub use list_jobs::{ListJobsBuilder, Order};
+pub use resources::{BackoffConfig, Job, JobPage, JobStatus, PageLinks, RetentionConfig};
 pub use router::Router;
 pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};

@@ -17,11 +17,13 @@ use serde::Serialize;
 use url::Url;
 
 use crate::bulk_enqueue::BulkEnqueueBuilder;
+use crate::count_jobs::CountJobsBuilder;
 use crate::enqueue::EnqueueBuilder;
 use crate::error::ZizqError;
 use crate::failure::FailureBuilder;
 use crate::format::Format;
 use crate::job::JobKind;
+use crate::list_jobs::ListJobsBuilder;
 use crate::resources::{BackoffConfig, Job, RetentionConfig};
 use crate::take::{TakeBuilder, TakeStream};
 use crate::unique_key::UniqueScope;
@@ -281,6 +283,96 @@ impl Client {
         self.parse_job_response(response).await
     }
 
+    /// Begin a `GET /jobs` listing. Returns a [`ListJobsBuilder`]
+    /// that accumulates filter / paging parameters and is awaited to
+    /// fetch a single [`JobPage`]. Subsequent pages are followed via
+    /// [`Client::get_page`] using the [`PageLinks::next`] /
+    /// [`PageLinks::prev`] paths the server emits.
+    ///
+    /// [`JobPage`]: crate::JobPage
+    /// [`PageLinks::next`]: crate::PageLinks::next
+    /// [`PageLinks::prev`]: crate::PageLinks::prev
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, JobPage, JobStatus, Order};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut page = client
+    ///     .list_jobs()
+    ///     .status([JobStatus::Ready])
+    ///     .queue(["emails"])
+    ///     .order(Order::Asc)
+    ///     .limit(100)
+    ///     .await?;
+    ///
+    /// loop {
+    ///     for job in &page.jobs {
+    ///         // ... handle each job ...
+    ///         let _ = &job.id;
+    ///     }
+    ///     let Some(next) = page.pages.next.clone() else { break };
+    ///     page = client.get_page::<JobPage>(&next).await?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn list_jobs(&self) -> ListJobsBuilder<'_> {
+        ListJobsBuilder::new(self)
+    }
+
+    /// Begin a `GET /jobs/count`. Returns a [`CountJobsBuilder`] that
+    /// accumulates job-selection filters and is awaited to fetch the
+    /// number of matching jobs. With no filters, counts all jobs.
+    ///
+    /// Shares the filter set (`status`, `queue`, `type`, `id`,
+    /// `filter`) with [`Client::list_jobs`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, JobStatus};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let ready = client.count_jobs().status([JobStatus::Ready]).await?;
+    /// println!("{ready} ready jobs");
+    /// # Ok(()) }
+    /// ```
+    pub fn count_jobs(&self) -> CountJobsBuilder<'_> {
+        CountJobsBuilder::new(self)
+    }
+
+    /// Follow a server-emitted pagination path (e.g.
+    /// [`PageLinks::next`]) and decode the response as `T`.
+    ///
+    /// The server returns pagination cursors as paths only (no host),
+    /// so the path is resolved against the configured base URL. The
+    /// resolved URL's host and port are validated to match the base —
+    /// a malformed or protocol-relative path can't redirect the
+    /// client to a different host.
+    ///
+    /// `T` is anything that implements [`DeserializeOwned`], typically
+    /// [`JobPage`] for `GET /jobs` results. Future paginated resources
+    /// (e.g. error listings) reuse this same method.
+    ///
+    /// [`PageLinks::next`]: crate::PageLinks::next
+    /// [`JobPage`]: crate::JobPage
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, JobPage};
+    /// # async fn run(client: &Client, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Type can be inferred from the binding…
+    /// let next: JobPage = client.get_page(path).await?;
+    /// // …or supplied via turbofish.
+    /// let _ = client.get_page::<JobPage>(path).await?;
+    /// # let _ = next;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_page<T: DeserializeOwned>(&self, path: &str) -> Result<T, ZizqError> {
+        let url = self.resolve_page_path(path)?;
+        self.get_decoded(url).await
+    }
+
     /// Permanently remove a job from the server.
     ///
     /// A job that doesn't exist surfaces as [`ZizqError::Response`] with
@@ -450,13 +542,47 @@ impl Client {
     /// `url` crate, so IDs with reserved characters are handled
     /// correctly. Appends rather than overrides, so a base URL with a
     /// path prefix (e.g. `http://host/api`) keeps that prefix.
-    fn url(&self, segments: &[&str]) -> Url {
+    pub(crate) fn url(&self, segments: &[&str]) -> Url {
         let mut url = self.inner.base_url.clone();
         url.path_segments_mut()
             .expect("base URL is http(s)")
             .pop_if_empty()
             .extend(segments);
         url
+    }
+
+    /// GET the given URL and decode the response body as `T`.
+    pub(crate) async fn get_decoded<T: DeserializeOwned>(&self, url: Url) -> Result<T, ZizqError> {
+        let response = self.send(reqwest::Method::GET, url, None).await?;
+        let status = response.status();
+        let format = self.response_format(&response);
+        let body_bytes = response.bytes().await?;
+        if !status.is_success() {
+            let message = extract_error_message(&body_bytes, format);
+            return Err(ZizqError::Response {
+                status: status.as_u16(),
+                message,
+            });
+        }
+        decode_body(&body_bytes, format)
+    }
+
+    /// Resolve a server-emitted pagination path against the
+    /// configured base URL. Validates that the resolved URL's host
+    /// and port match the base — guards against a malformed or
+    /// protocol-relative path (e.g. `//evil.com/jobs`) redirecting
+    /// the client at a different host.
+    fn resolve_page_path(&self, path: &str) -> Result<Url, ZizqError> {
+        let resolved = self.inner.base_url.join(path)?;
+        let base = &self.inner.base_url;
+        if resolved.host_str() != base.host_str()
+            || resolved.port_or_known_default() != base.port_or_known_default()
+        {
+            return Err(ZizqError::Decode(format!(
+                "page path resolved to a different host than the configured base URL: {resolved}"
+            )));
+        }
+        Ok(resolved)
     }
 
     /// Issue an HTTP request with the configured format negotiation.

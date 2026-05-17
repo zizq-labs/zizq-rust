@@ -25,9 +25,10 @@ use crate::failure::FailureBuilder;
 use crate::format::Format;
 use crate::job::JobKind;
 use crate::job_patch::JobPatch;
+use crate::list_errors::ListErrorsBuilder;
 use crate::list_jobs::ListJobsBuilder;
 use crate::patch_jobs::PatchJobsBuilder;
-use crate::resources::{BackoffConfig, Job, RetentionConfig};
+use crate::resources::{BackoffConfig, ErrorRecord, Job, RetentionConfig};
 use crate::take::{TakeBuilder, TakeStream};
 use crate::unique_key::UniqueScope;
 
@@ -553,6 +554,51 @@ impl Client {
     pub async fn patch_job(&self, id: &str, patch: JobPatch) -> Result<Job, ZizqError> {
         let url = self.url(&["jobs", id]);
         self.patch_decoded(url, &patch).await
+    }
+
+    /// Begin listing a job's error history. Returns a
+    /// [`ListErrorsBuilder`] that accumulates paging parameters and is
+    /// awaited to fetch a single [`ErrorPage`], or
+    /// [`stream`](ListErrorsBuilder::stream)ed to iterate every record.
+    ///
+    /// A job that doesn't exist surfaces (on await) as
+    /// [`ZizqError::Response`] with `status: 404`.
+    ///
+    /// [`ErrorPage`]: crate::ErrorPage
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let page = client.list_errors("job-123").await?;
+    /// for err in &page.errors {
+    ///     println!("attempt {}: {}", err.attempt, err.message);
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn list_errors(&self, id: &str) -> ListErrorsBuilder<'_> {
+        ListErrorsBuilder::new(self, id.to_string())
+    }
+
+    /// Fetch a single error record for a job by attempt number.
+    ///
+    /// Issues `GET /jobs/{id}/errors/{attempt}`. A missing job, or a
+    /// job that has no failure recorded for that attempt, surfaces as
+    /// [`ZizqError::Response`] with `status: 404`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let err = client.get_error("job-123", 2).await?;
+    /// println!("attempt {} failed: {}", err.attempt, err.message);
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_error(&self, id: &str, attempt: u32) -> Result<ErrorRecord, ZizqError> {
+        let url = self.url(&["jobs", id, "errors", &attempt.to_string()]);
+        self.get_decoded(url).await
     }
 
     /// Begin streaming jobs from the server. Returns a [`TakeBuilder`]

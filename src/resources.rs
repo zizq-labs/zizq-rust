@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Chris Corbyn <chris@zizq.io>
 // Licensed under the MIT License. See LICENSE file for details.
 
-//! Server-side resource types returned in API responses.
+//! Shared public API types — the resources the server returns, plus
+//! the enums used to address and order them.
 
 use serde::Deserialize;
 
@@ -61,6 +62,27 @@ impl JobStatus {
     }
 }
 
+/// Sort order for the paginated listing endpoints — used by both job
+/// and error listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Order {
+    /// Oldest first.
+    Asc,
+
+    /// Newest first.
+    Desc,
+}
+
+impl Order {
+    /// API-serialized name, used when building listing query strings.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
 /// One page of jobs returned by [`Client::list_jobs`].
 ///
 /// Follow [`pages.next`](PageLinks::next) (or `.prev`) via
@@ -107,6 +129,55 @@ pub struct PageLinks {
 
     /// Path to follow for the previous page, or `None` at the start.
     pub prev: Option<String>,
+}
+
+/// A single failure record for a job — one per failed attempt.
+///
+/// Retrieved via [`Client::list_errors`] (paginated) or
+/// [`Client::get_error`] (by attempt number).
+///
+/// [`Client::list_errors`]: crate::Client::list_errors
+/// [`Client::get_error`]: crate::Client::get_error
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorRecord {
+    /// Which attempt this error corresponds to (1-based).
+    pub attempt: u32,
+
+    /// Error message reported by the worker.
+    pub message: String,
+
+    /// Error class/type (e.g. `"TimeoutError"`), if the worker
+    /// supplied one.
+    #[serde(default)]
+    pub error_type: Option<String>,
+
+    /// Stack trace / backtrace, if the worker supplied one.
+    #[serde(default)]
+    pub backtrace: Option<String>,
+
+    /// When the job was dequeued for this attempt, as Unix ms.
+    pub dequeued_at: u64,
+
+    /// When this attempt failed, as Unix ms.
+    pub failed_at: u64,
+}
+
+/// One page of [`ErrorRecord`]s returned by [`Client::list_errors`].
+///
+/// Follow [`pages.next`](PageLinks::next) (or `.prev`) via
+/// [`Client::get_page`] to navigate, or use
+/// [`ListErrorsBuilder::stream`] to iterate every record across pages.
+///
+/// [`Client::list_errors`]: crate::Client::list_errors
+/// [`Client::get_page`]: crate::Client::get_page
+/// [`ListErrorsBuilder::stream`]: crate::ListErrorsBuilder::stream
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorPage {
+    /// Error records on this page, in the requested order.
+    pub errors: Vec<ErrorRecord>,
+
+    /// Pagination cursors as server-emitted paths.
+    pub pages: PageLinks,
 }
 
 /// Per-job backoff configuration controlling the retry delay curve.

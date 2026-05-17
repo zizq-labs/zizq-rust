@@ -461,6 +461,76 @@ async fn patch_job_surfaces_404_as_response_error() {
     }
 }
 
+// --- get_error ------------------------------------------------------------
+
+#[tokio::test]
+async fn get_error_returns_the_record() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(
+            200,
+            &json!({
+                "attempt": 2,
+                "message": "connection timed out",
+                "error_type": "TimeoutError",
+                "dequeued_at": 1000,
+                "failed_at": 2000,
+            }),
+        )
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let err = client.get_error("job-e1", 2).await.unwrap();
+
+    assert_eq!(err.attempt, 2);
+    assert_eq!(err.message, "connection timed out");
+    assert_eq!(err.error_type.as_deref(), Some("TimeoutError"));
+    // `backtrace` was absent — decodes to `None`.
+    assert!(err.backtrace.is_none());
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "GET");
+    assert_eq!(req.path, "/jobs/job-e1/errors/2");
+}
+
+#[tokio::test]
+async fn get_error_percent_encodes_job_id() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(
+            200,
+            &json!({ "attempt": 1, "message": "x", "dequeued_at": 0, "failed_at": 0 }),
+        )
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    // Slash in the id would split routing on the server side without
+    // percent-encoding.
+    client.get_error("ns/abc", 1).await.unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.path, "/jobs/ns%2Fabc/errors/1");
+}
+
+#[tokio::test]
+async fn get_error_surfaces_404_as_response_error() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(404, json!({ "error": "error record not found" }))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let err = client.get_error("job-e1", 99).await.unwrap_err();
+
+    match err {
+        ZizqError::Response { status, message } => {
+            assert_eq!(status, 404);
+            assert_eq!(message, "error record not found");
+        }
+        other => panic!("expected Response error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn report_failure_surfaces_404_as_response_error() {
     let server = MockServer::start().await;

@@ -118,6 +118,7 @@ mod format;
 mod job;
 mod job_filter;
 mod job_patch;
+mod list_errors;
 mod list_jobs;
 mod patch_jobs;
 mod resources;
@@ -137,9 +138,13 @@ pub use failure::FailureBuilder;
 pub use format::Format;
 pub use job::JobKind;
 pub use job_patch::{JobPatch, RetentionPatch};
-pub use list_jobs::{ListJobsBuilder, Order};
+pub use list_errors::ListErrorsBuilder;
+pub use list_jobs::ListJobsBuilder;
 pub use patch_jobs::PatchJobsBuilder;
-pub use resources::{BackoffConfig, Job, JobPage, JobStatus, PageLinks, RetentionConfig};
+pub use resources::{
+    BackoffConfig, ErrorPage, ErrorRecord, Job, JobPage, JobStatus, Order, PageLinks,
+    RetentionConfig,
+};
 pub use router::Router;
 pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};

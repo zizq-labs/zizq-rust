@@ -38,11 +38,13 @@ self-contained job queue server.
 - [x] Job mutation: single (`patch_job` / `delete_job`) and bulk
       (`patch_all_jobs` / `delete_all_jobs`), the bulk forms sharing a
       filter set (status / queue / type / id / jq payload expression)
+- [x] Per-job error history: `list_errors` (paginated, streamable)
+      and `get_error`
+- [x] Server introspection: `health`, `server_version`, `list_queues`
 
 ## What's not done yet
 
 - [ ] TLS (rustls and native-tls feature flags)
-- [ ] Error queries (per-job failure history)
 - [ ] Cron entry management
 
 ## Taster

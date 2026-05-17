@@ -28,26 +28,7 @@ use url::Url;
 use crate::client::Client;
 use crate::error::ZizqError;
 use crate::job_filter::{job_filter_setters, JobFilter};
-use crate::resources::{Job, JobPage};
-
-/// Sort order for [`ListJobsBuilder`] results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Order {
-    /// Oldest first.
-    Asc,
-
-    /// Newest first.
-    Desc,
-}
-
-impl Order {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Asc => "asc",
-            Self::Desc => "desc",
-        }
-    }
-}
+use crate::resources::{Job, JobPage, Order};
 
 /// Builder for [`Client::list_jobs`].
 ///

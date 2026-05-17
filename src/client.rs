@@ -35,6 +35,12 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
+/// Response envelope for `GET /version`.
+#[derive(serde::Deserialize)]
+struct VersionResponse {
+    version: String,
+}
+
 /// Connection handle to a Zizq server.
 ///
 /// Construct with [`Client::builder`]. The handle is internally an
@@ -260,6 +266,45 @@ impl Client {
         message: impl Into<String>,
     ) -> FailureBuilder<'_> {
         FailureBuilder::new(self, id.into(), message.into())
+    }
+
+    /// Check server health.
+    ///
+    /// Issues `GET /health`. Returns `Ok(())` when the server
+    /// responds `200 OK`; a transport failure or any other status
+    /// surfaces as the corresponding [`ZizqError`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// client.health().await?;
+    /// println!("server is healthy");
+    /// # Ok(()) }
+    /// ```
+    pub async fn health(&self) -> Result<(), ZizqError> {
+        let url = self.url(&["health"]);
+        let response = self.send(reqwest::Method::GET, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::OK])
+            .await
+    }
+
+    /// Fetch the server's version string.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let version = client.server_version().await?;
+    /// println!("server is running zizq {version}");
+    /// # Ok(()) }
+    /// ```
+    pub async fn server_version(&self) -> Result<String, ZizqError> {
+        let url = self.url(&["version"]);
+        let resp: VersionResponse = self.get_decoded(url).await?;
+        Ok(resp.version)
     }
 
     /// Fetch a single job by id.

@@ -104,7 +104,7 @@ pub struct JobPatch {
 
     /// New ready-at time, in Unix milliseconds.
     #[serde(skip_serializing_if = "Field::is_keep")]
-    ready_at: Field<i64>,
+    ready_at: Field<u64>,
 
     /// New retry limit.
     #[serde(skip_serializing_if = "Field::is_keep")]
@@ -157,7 +157,7 @@ impl JobPatch {
 
     /// Set the job's ready-at time, in Unix milliseconds. A future
     /// time moves a ready job to `Scheduled`.
-    pub fn ready_at(mut self, ready_at_ms: i64) -> Self {
+    pub fn ready_at(mut self, ready_at_ms: u64) -> Self {
         self.ready_at = Field::Set(ready_at_ms);
         self
     }

@@ -78,7 +78,7 @@ pub struct EnqueueBuilder<'a, T> {
     ///
     /// Future-dated values cause the enqueued job to be in the `Scheduled`
     /// status.
-    ready_at_ms: Option<i64>,
+    ready_at_ms: Option<u64>,
 
     /// Maximum attempts permitted before the job is considered dead on failure.
     retry_limit: Option<u32>,

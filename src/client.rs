@@ -1088,7 +1088,7 @@ pub(crate) struct EnqueueRequest {
 
     /// Optional timestamp at which this job becomes ready to run.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) ready_at: Option<i64>,
+    pub(crate) ready_at: Option<u64>,
 
     /// Optional retry limit after which the job is killed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1135,7 +1135,7 @@ pub(crate) struct FailureRequest {
     /// Optional override for when the job should be retried, overriding
     /// the job's backoff policy.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) retry_at: Option<i64>,
+    pub(crate) retry_at: Option<u64>,
 
     /// Kill flag, set to `true` to explicitly prevent further retries.
     #[serde(skip_serializing_if = "std::ops::Not::not")]

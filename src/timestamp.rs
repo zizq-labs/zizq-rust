@@ -4,7 +4,7 @@
 //! Conversion helpers between [`OffsetDateTime`] and the Zizq API's
 //! millisecond timestamps.
 //!
-//! The API uses Unix milliseconds (signed 64-bit) throughout —
+//! The API uses Unix milliseconds (unsigned 64-bit) throughout —
 //! `ready_at`, `dequeued_at`, `failed_at`, `completed_at`, `purge_at`,
 //! and the cron entry timestamps. The `time` crate doesn't expose a
 //! direct millis accessor (only seconds and nanoseconds), so we route
@@ -13,7 +13,7 @@
 use time::OffsetDateTime;
 
 /// Convert an [`OffsetDateTime`] to a Unix millisecond timestamp.
-pub(crate) fn to_ms_epoch(t: OffsetDateTime) -> i64 {
+pub(crate) fn to_ms_epoch(t: OffsetDateTime) -> u64 {
     let nanos = t.unix_timestamp_nanos();
-    (nanos / 1_000_000) as i64
+    (nanos / 1_000_000) as u64
 }

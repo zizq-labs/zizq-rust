@@ -71,7 +71,7 @@ pub struct FailureBuilder<'a> {
 
     /// Optional forced retry time, as Unix ms. Bypasses the server's
     /// computed backoff.
-    retry_at_ms: Option<i64>,
+    retry_at_ms: Option<u64>,
 
     /// When true, kills the job immediately regardless of retry limit.
     kill: bool,

@@ -193,13 +193,13 @@ pub struct ErrorPage {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Deserialize)]
 pub struct BackoffConfig {
     /// Base delay in milliseconds, applied to every retry.
-    pub base_ms: u64,
+    pub base_ms: u32,
 
     /// Backoff curve steepness — multiplied into `attempts ** exponent`.
-    pub exponent: f64,
+    pub exponent: f32,
 
     /// Maximum random jitter in milliseconds per attempt multiplier.
-    pub jitter_ms: u64,
+    pub jitter_ms: u32,
 }
 
 /// Per-job retention configuration controlling how long jobs in
@@ -256,7 +256,7 @@ pub struct Job {
     ///
     /// Once this time is reached the job transitions automatically
     /// from [`JobStatus::Scheduled`] to [`JobStatus::Ready`].
-    pub ready_at: i64,
+    pub ready_at: u64,
 
     /// Number of attempts so far.
     pub attempts: u32,
@@ -270,20 +270,20 @@ pub struct Job {
     pub backoff: Option<BackoffConfig>,
 
     /// Time the job was most recently acquired by a worker, as Unix ms.
-    pub dequeued_at: Option<i64>,
+    pub dequeued_at: Option<u64>,
 
     /// Time the job last failed, as Unix ms.
-    pub failed_at: Option<i64>,
+    pub failed_at: Option<u64>,
 
     /// Time the job completed, as Unix ms.
-    pub completed_at: Option<i64>,
+    pub completed_at: Option<u64>,
 
     /// Per-job retention configuration. `None` means the server
     /// default applies.
     pub retention: Option<RetentionConfig>,
 
     /// Time at which the reaper will hard-delete this job, as Unix ms.
-    pub purge_at: Option<i64>,
+    pub purge_at: Option<u64>,
 
     /// Uniqueness constraint that this job carries, if any.
     pub unique_key: Option<UniqueKey>,
@@ -321,7 +321,7 @@ struct JobFromApi {
     payload: Option<serde_json::Value>,
 
     /// Earliest time at which the job becomes ready, as Unix ms.
-    ready_at: i64,
+    ready_at: u64,
 
     /// Number of attempts so far.
     attempts: u32,
@@ -336,15 +336,15 @@ struct JobFromApi {
 
     /// Time the job was most recently acquired by a worker, as Unix ms.
     #[serde(default)]
-    dequeued_at: Option<i64>,
+    dequeued_at: Option<u64>,
 
     /// Time the job last failed, as Unix ms.
     #[serde(default)]
-    failed_at: Option<i64>,
+    failed_at: Option<u64>,
 
     /// Time the job completed, as Unix ms.
     #[serde(default)]
-    completed_at: Option<i64>,
+    completed_at: Option<u64>,
 
     /// Per-job retention configuration.
     #[serde(default)]
@@ -352,7 +352,7 @@ struct JobFromApi {
 
     /// Time at which the reaper will hard-delete this job, as Unix ms.
     #[serde(default)]
-    purge_at: Option<i64>,
+    purge_at: Option<u64>,
 
     /// The unique key use to prevent duplicate enqueues, if any.
     #[serde(default)]

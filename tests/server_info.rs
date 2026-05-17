@@ -77,3 +77,37 @@ async fn server_version_works_over_messagepack() {
     let version = client.server_version().await.unwrap();
     assert_eq!(version, "9.9.9");
 }
+
+#[tokio::test]
+async fn list_queues_returns_the_queue_names() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(200, json!({ "queues": ["emails", "webhooks"] }))
+        .await;
+
+    let client = Client::builder()
+        .url(&server.url)
+        .format(Format::Json)
+        .build()
+        .unwrap();
+    let queues = client.list_queues().await.unwrap();
+    assert_eq!(queues, vec!["emails", "webhooks"]);
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "GET");
+    assert_eq!(req.path, "/queues");
+}
+
+#[tokio::test]
+async fn list_queues_returns_empty_when_no_queues() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, json!({ "queues": [] })).await;
+
+    let client = Client::builder()
+        .url(&server.url)
+        .format(Format::Json)
+        .build()
+        .unwrap();
+    let queues = client.list_queues().await.unwrap();
+    assert!(queues.is_empty());
+}

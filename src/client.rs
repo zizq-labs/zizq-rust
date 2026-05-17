@@ -41,6 +41,12 @@ struct VersionResponse {
     version: String,
 }
 
+/// Response envelope for `GET /queues`.
+#[derive(serde::Deserialize)]
+struct QueuesResponse {
+    queues: Vec<String>,
+}
+
 /// Connection handle to a Zizq server.
 ///
 /// Construct with [`Client::builder`]. The handle is internally an
@@ -305,6 +311,26 @@ impl Client {
         let url = self.url(&["version"]);
         let resp: VersionResponse = self.get_decoded(url).await?;
         Ok(resp.version)
+    }
+
+    /// List the names of all queues currently known to the server.
+    ///
+    /// Issues `GET /queues`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// for queue in client.list_queues().await? {
+    ///     println!("queue: {queue}");
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn list_queues(&self) -> Result<Vec<String>, ZizqError> {
+        let url = self.url(&["queues"]);
+        let resp: QueuesResponse = self.get_decoded(url).await?;
+        Ok(resp.queues)
     }
 
     /// Fetch a single job by id.

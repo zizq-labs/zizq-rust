@@ -9,9 +9,17 @@
 //!
 //! - `ZIZQ_URL` — server URL (default `http://127.0.0.1:7890`)
 //! - `ZIZQ_FORMAT` — `json` or `msgpack` (default `json`)
+//! - `ZIZQ_CA` — path to a PEM CA certificate to trust, for an
+//!   `https://` server with a privately-signed certificate
+//! - `ZIZQ_CLIENT_CERT` / `ZIZQ_CLIENT_KEY` — paths to a PEM client
+//!   certificate and private key for mutual TLS (set both or neither)
 //! - `JOB_COUNT` — number of jobs (default 5000)
 //! - `CONCURRENCY` — worker concurrency (default 25)
 //! - `PREFETCH` — worker prefetch (default `CONCURRENCY * 2`)
+//!
+//! The TLS vars require a TLS feature (`rustls-tls`, the default, or
+//! `native-tls`) — the example errors if one is set in a build with
+//! no TLS feature.
 //!
 //! Run with:
 //!
@@ -19,10 +27,9 @@
 //! cargo run --release --example throughput
 //! ```
 //!
-//! Assumes a happy-path plain-HTTP connection to a clean server. If
-//! there are leftover jobs on `rust/bench` from a previous run, the
-//! worker will see them first and shutdown may trigger before all N
-//! new jobs have been processed.
+//! Leftover jobs on `rust/bench` from a previous run are deleted
+//! before the benchmark starts, so the dequeue phase's shutdown
+//! trigger isn't tripped early by a stale job.
 
 use std::convert::Infallible;
 use std::env;
@@ -34,7 +41,7 @@ use std::time::Instant;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use zizq::{Client, Format, JobKind, Router, Worker};
+use zizq::{Client, ClientBuilder, Format, JobKind, Router, Worker};
 
 #[derive(Serialize, Deserialize)]
 struct Bench {
@@ -65,7 +72,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(_) => concurrency * 2,
     };
 
-    let client = Client::builder().url(&url).format(format).build()?;
+    let client = apply_tls_from_env(Client::builder().url(&url).format(format))?.build()?;
+
+    // --- Cleanup ---
+    //
+    // Delete any jobs left on the bench queue by an earlier run.
+    // Otherwise the dequeue phase could see a stale job carrying
+    // `n == JOB_COUNT` and trigger shutdown before this run's jobs
+    // are all processed.
+
+    let deleted = client.delete_all_jobs().queue([Bench::QUEUE]).await?;
+    if deleted > 0 {
+        eprintln!("Deleted {deleted} leftover jobs from a previous run!");
+    }
 
     // --- Enqueue phase ---
     //
@@ -176,4 +195,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     Ok(())
+}
+
+/// Apply TLS settings from the `ZIZQ_CA` / `ZIZQ_CLIENT_CERT` /
+/// `ZIZQ_CLIENT_KEY` environment variables — each a path to a PEM
+/// file — to the client builder.
+#[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+fn apply_tls_from_env(mut builder: ClientBuilder) -> Result<ClientBuilder, Box<dyn Error>> {
+    if let Some(ca) = env::var_os("ZIZQ_CA") {
+        builder = builder.ca_certificate(std::fs::read(ca)?);
+    }
+    match (
+        env::var_os("ZIZQ_CLIENT_CERT"),
+        env::var_os("ZIZQ_CLIENT_KEY"),
+    ) {
+        (Some(cert), Some(key)) => {
+            builder = builder.client_identity(std::fs::read(cert)?, std::fs::read(key)?);
+        }
+        (None, None) => {}
+        _ => return Err("ZIZQ_CLIENT_CERT and ZIZQ_CLIENT_KEY must be set together".into()),
+    }
+    Ok(builder)
+}
+
+/// Compiled without a TLS feature, so the TLS environment variables
+/// cannot be honoured — flag it rather than silently ignoring them.
+#[cfg(not(any(feature = "rustls-tls", feature = "native-tls")))]
+fn apply_tls_from_env(builder: ClientBuilder) -> Result<ClientBuilder, Box<dyn Error>> {
+    for var in ["ZIZQ_CA", "ZIZQ_CLIENT_CERT", "ZIZQ_CLIENT_KEY"] {
+        if env::var_os(var).is_some() {
+            return Err(format!(
+                "{var} is set, but this build has no TLS feature enabled \
+                 (rebuild with the `rustls-tls` or `native-tls` feature)"
+            )
+            .into());
+        }
+    }
+    Ok(builder)
 }

@@ -75,4 +75,10 @@ pub enum ZizqError {
     /// [`PatchJobsBuilder::patch`]: crate::PatchJobsBuilder::patch
     #[error("bulk patch requires a patch — call .patch(...) before awaiting")]
     MissingPatch,
+
+    /// A TLS root certificate or client identity could not be loaded
+    /// — typically malformed PEM passed to the client builder's TLS
+    /// configuration.
+    #[error("TLS configuration error: {0}")]
+    Tls(String),
 }

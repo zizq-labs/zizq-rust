@@ -13,6 +13,14 @@ keywords = ["job-queue", "message-queue", "background-worker", "cron", "schedule
 categories = ["asynchronous", "api-bindings"]
 exclude = ["examples/"]
 
+[features]
+default = ["rustls-tls"]
+# TLS backends — enable exactly one. `rustls-tls` (default) is pure
+# Rust with no system OpenSSL dependency; `native-tls` uses the
+# platform TLS library.
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["http2", "stream"] }
 serde = { version = "1", features = ["derive"] }

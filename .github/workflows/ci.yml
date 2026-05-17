@@ -43,6 +43,20 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features
 
+      # `--all-features` enables both TLS backends, and `load_identity`
+      # gives rustls precedence when both are on — so the native-tls
+      # code path needs its own explicit run to be compiled and linted.
+      - name: cargo clippy (native-tls backend)
+        run: cargo clippy --all-targets --no-default-features --features native-tls
+
+      - name: cargo clippy (no TLS)
+        run: cargo clippy --all-targets --no-default-features
+
+      - name: Test feature combinations
+        run: |
+          cargo test --no-default-features --features native-tls
+          cargo test --no-default-features
+
   test:
     name: Test (Rust ${{ matrix.rust-version }})
     needs: check

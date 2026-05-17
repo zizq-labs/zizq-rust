@@ -954,6 +954,15 @@ pub struct ClientBuilder {
 
     /// Deadline after which reads fail if no data is received.
     read_timeout: Option<Duration>,
+
+    /// PEM-encoded extra root CA certificate to trust, if any.
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    ca_cert: Option<Vec<u8>>,
+
+    /// PEM-encoded client certificate chain + private key for mutual
+    /// TLS, if any.
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    identity: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl ClientBuilder {
@@ -991,25 +1000,89 @@ impl ClientBuilder {
         self
     }
 
+    /// Trust an additional PEM-encoded root CA certificate when
+    /// connecting over HTTPS, on top of the system root store. Use
+    /// this when the Zizq server's certificate is signed by a private
+    /// or internal CA.
+    ///
+    /// Available only when a TLS feature is enabled (`rustls-tls`, the
+    /// default, or `native-tls`).
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    pub fn ca_certificate(mut self, pem: impl AsRef<[u8]>) -> Self {
+        self.ca_cert = Some(pem.as_ref().to_vec());
+        self
+    }
+
+    /// Present a client certificate for mutual TLS (mTLS). Both
+    /// arguments are PEM-encoded: the client certificate (chain) and
+    /// its PKCS#8 private key.
+    ///
+    /// Available only when a TLS feature is enabled (`rustls-tls`, the
+    /// default, or `native-tls`).
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    pub fn client_identity(
+        mut self,
+        cert_pem: impl AsRef<[u8]>,
+        key_pem: impl AsRef<[u8]>,
+    ) -> Self {
+        self.identity = Some((cert_pem.as_ref().to_vec(), key_pem.as_ref().to_vec()));
+        self
+    }
+
+    /// Apply the configured TLS settings (extra root CA, client
+    /// identity) to a `reqwest` client builder. Called for both
+    /// connection pools.
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    fn apply_tls(
+        &self,
+        mut builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, ZizqError> {
+        if let Some(ca) = &self.ca_cert {
+            let cert = reqwest::Certificate::from_pem(ca)
+                .map_err(|e| ZizqError::Tls(format!("invalid CA certificate: {e}")))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        if let Some((cert_pem, key_pem)) = &self.identity {
+            builder = builder.identity(load_identity(cert_pem, key_pem)?);
+        }
+        Ok(builder)
+    }
+
+    /// No TLS feature is enabled, so there is nothing to apply.
+    #[cfg(not(any(feature = "rustls-tls", feature = "native-tls")))]
+    fn apply_tls(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, ZizqError> {
+        Ok(builder)
+    }
+
     /// Finalise the builder and produce a [`Client`].
     ///
     /// Returns [`ZizqError::MissingUrl`] if no URL was supplied,
-    /// [`ZizqError::InvalidUrl`] if the URL fails to parse, or
-    /// [`ZizqError::Transport`] if the underlying HTTP client cannot
-    /// be constructed.
+    /// [`ZizqError::InvalidUrl`] if the URL fails to parse,
+    /// [`ZizqError::Tls`] if a configured TLS certificate or client
+    /// identity is invalid, or [`ZizqError::Transport`] if the
+    /// underlying HTTP client cannot be constructed.
     pub fn build(self) -> Result<Client, ZizqError> {
-        let raw_url = self.url.ok_or(ZizqError::MissingUrl)?;
-        let base_url = Url::parse(&raw_url)?;
+        // Validate the URL first (cheap fail-fast), but borrow rather
+        // than move it out of `self` so the TLS config can still
+        // read the builder's fields below.
+        let raw_url = self.url.as_deref().ok_or(ZizqError::MissingUrl)?;
+        let base_url = Url::parse(raw_url)?;
 
         let connect_timeout = self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
         let read_timeout = self.read_timeout.unwrap_or(DEFAULT_READ_TIMEOUT);
 
-        let http2 = reqwest::Client::builder()
-            .http2_prior_knowledge()
-            .pool_idle_timeout(Some(Duration::from_secs(90)))
-            .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
-            .connect_timeout(connect_timeout)
-            .read_timeout(read_timeout)
+        let http2 = self
+            .apply_tls(
+                reqwest::Client::builder()
+                    .http2_prior_knowledge()
+                    .pool_idle_timeout(Some(Duration::from_secs(90)))
+                    .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
+                    .connect_timeout(connect_timeout)
+                    .read_timeout(read_timeout),
+            )?
             .build()?;
 
         // HTTP/1.1 pool for the long-lived take stream. We force HTTP/1.1
@@ -1017,12 +1090,15 @@ impl ClientBuilder {
         // TLS, ALPN would otherwise upgrade us to HTTP/2, which adds
         // framing overhead that we've measured as a net negative on a
         // single long-lived stream. Liveness knobs match http2.
-        let http1 = reqwest::Client::builder()
-            .http1_only()
-            .pool_idle_timeout(Some(Duration::from_secs(90)))
-            .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
-            .connect_timeout(connect_timeout)
-            .read_timeout(read_timeout)
+        let http1 = self
+            .apply_tls(
+                reqwest::Client::builder()
+                    .http1_only()
+                    .pool_idle_timeout(Some(Duration::from_secs(90)))
+                    .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
+                    .connect_timeout(connect_timeout)
+                    .read_timeout(read_timeout),
+            )?
             .build()?;
 
         Ok(Client {
@@ -1225,6 +1301,29 @@ fn extract_error_message(body: &[u8], format: Format) -> String {
     String::from_utf8_lossy(body).into_owned()
 }
 
+/// Build a [`reqwest::Identity`] from a PEM certificate chain and a
+/// PEM PKCS#8 private key. The construction is TLS-backend-specific:
+/// rustls wants the chain and key concatenated into one PEM document,
+/// native-tls takes them as separate arguments.
+#[cfg(feature = "rustls-tls")]
+fn load_identity(cert_pem: &[u8], key_pem: &[u8]) -> Result<reqwest::Identity, ZizqError> {
+    let mut combined = cert_pem.to_vec();
+    if !combined.ends_with(b"\n") {
+        combined.push(b'\n');
+    }
+    combined.extend_from_slice(key_pem);
+    reqwest::Identity::from_pem(&combined)
+        .map_err(|e| ZizqError::Tls(format!("invalid client identity: {e}")))
+}
+
+/// See the `rustls-tls` variant above. Selected only when
+/// `native-tls` is enabled without `rustls-tls`.
+#[cfg(all(feature = "native-tls", not(feature = "rustls-tls")))]
+fn load_identity(cert_pem: &[u8], key_pem: &[u8]) -> Result<reqwest::Identity, ZizqError> {
+    reqwest::Identity::from_pkcs8_pem(cert_pem, key_pem)
+        .map_err(|e| ZizqError::Tls(format!("invalid client identity: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,5 +1357,30 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(c.inner.format, Format::Json);
+    }
+
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    #[test]
+    fn build_accepts_a_ca_certificate() {
+        // reqwest stores the root certificate and defers its
+        // validation to connection time, so `build()` itself can't
+        // fail on a bad CA — this exercises the `ca_certificate`
+        // wiring through `apply_tls` and confirms it builds cleanly.
+        let built = Client::builder()
+            .url("https://localhost:7890")
+            .ca_certificate("placeholder ca pem")
+            .build();
+        assert!(built.is_ok());
+    }
+
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    #[test]
+    fn build_rejects_invalid_client_identity() {
+        let err = Client::builder()
+            .url("https://localhost:7890")
+            .client_identity("not a cert", "not a key")
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, ZizqError::Tls(_)));
     }
 }

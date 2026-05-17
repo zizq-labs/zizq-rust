@@ -41,10 +41,11 @@ self-contained job queue server.
 - [x] Per-job error history: `list_errors` (paginated, streamable)
       and `get_error`
 - [x] Server introspection: `health`, `server_version`, `list_queues`
+- [x] HTTPS / TLS — custom root CA and mutual-TLS client identity,
+      with a `rustls-tls` (default) or `native-tls` feature flag
 
 ## What's not done yet
 
-- [ ] TLS (rustls and native-tls feature flags)
 - [ ] Cron entry management
 
 ## Taster

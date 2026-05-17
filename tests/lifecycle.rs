@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::MockServer;
 use serde_json::json;
 use time::OffsetDateTime;
-use zizq::{Client, JobStatus, ZizqError};
+use zizq::{Client, JobPatch, JobStatus, ZizqError};
 
 fn fake_job_response(id: &str, queue: &str, status: &str, attempts: u32) -> serde_json::Value {
     json!({
@@ -361,6 +361,96 @@ async fn delete_job_surfaces_404_as_response_error() {
 
     let client = Client::builder().url(&server.url).build().unwrap();
     let err = client.delete_job("missing").await.unwrap_err();
+
+    match err {
+        ZizqError::Response { status, message } => {
+            assert_eq!(status, 404);
+            assert_eq!(message, "job not found");
+        }
+        other => panic!("expected Response error, got {other:?}"),
+    }
+}
+
+// --- patch_job ------------------------------------------------------------
+
+#[tokio::test]
+async fn patch_job_returns_the_updated_job() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(200, &fake_job_response("job-p1", "emails", "ready", 0))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let job = client
+        .patch_job("job-p1", JobPatch::new().priority(10))
+        .await
+        .unwrap();
+
+    assert_eq!(job.id, "job-p1");
+    assert_eq!(job.status, JobStatus::Ready);
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "PATCH");
+    assert_eq!(req.path, "/jobs/job-p1");
+}
+
+#[tokio::test]
+async fn patch_job_sends_only_changed_fields() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(200, &fake_job_response("job-p2", "urgent", "ready", 0))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    client
+        .patch_job(
+            "job-p2",
+            JobPatch::new()
+                .move_to_queue("urgent") // set
+                .clear_backoff() // clear → null
+                .keep_priority(), // keep → absent
+        )
+        .await
+        .unwrap();
+
+    // Set field carries its value, cleared field is null, kept field
+    // is omitted entirely.
+    let req = server.last_request().await;
+    let body = msgpack_decode(&req.body);
+    assert_eq!(body, json!({ "queue": "urgent", "backoff": null }));
+}
+
+#[tokio::test]
+async fn patch_job_percent_encodes_job_id() {
+    let server = MockServer::start().await;
+    server
+        .set_response_msgpack(200, &fake_job_response("ns/abc", "emails", "ready", 0))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    // Slash in the id would split routing on the server side without
+    // percent-encoding.
+    client
+        .patch_job("ns/abc", JobPatch::new().priority(1))
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.path, "/jobs/ns%2Fabc");
+}
+
+#[tokio::test]
+async fn patch_job_surfaces_404_as_response_error() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(404, json!({ "error": "job not found" }))
+        .await;
+
+    let client = Client::builder().url(&server.url).build().unwrap();
+    let err = client
+        .patch_job("missing", JobPatch::new().priority(1))
+        .await
+        .unwrap_err();
 
     match err {
         ZizqError::Response { status, message } => {

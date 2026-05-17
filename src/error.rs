@@ -67,4 +67,12 @@ pub enum ZizqError {
     /// [`WorkerBuilder::handler`]: crate::WorkerBuilder::handler
     #[error("worker handler is required")]
     MissingHandler,
+
+    /// A bulk [`PatchJobsBuilder`] was awaited without calling
+    /// [`PatchJobsBuilder::patch`] to supply the update to apply.
+    ///
+    /// [`PatchJobsBuilder`]: crate::PatchJobsBuilder
+    /// [`PatchJobsBuilder::patch`]: crate::PatchJobsBuilder::patch
+    #[error("bulk patch requires a patch — call .patch(...) before awaiting")]
+    MissingPatch,
 }

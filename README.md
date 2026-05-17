@@ -21,6 +21,7 @@ self-contained job queue server.
       limit, backoff, retention, uniqueness key)
 - [x] Single-job enqueue via a fluent builder that resolves trait
       defaults and per-call overrides
+- [x] Bulk enqueue — many jobs submitted in a single request
 - [x] Streaming `/jobs/take` with NDJSON and length-prefixed
       MessagePack framing; heartbeats filtered transparently
 - [x] Job acknowledgement: `report_success`, `report_success_bulk`
@@ -33,12 +34,15 @@ self-contained job queue server.
       shutdown
 - [x] `Router` — type-driven dispatch keyed by `JobKind::NAME`, so
       one worker can serve many job types
+- [x] Job queries: `get_job`, paginated `list_jobs`, and `count_jobs`
+- [x] Job mutation: single (`patch_job` / `delete_job`) and bulk
+      (`patch_all_jobs` / `delete_all_jobs`), the bulk forms sharing a
+      filter set (status / queue / type / id / jq payload expression)
 
 ## What's not done yet
 
-- [ ] Bulk enqueue
 - [ ] TLS (rustls and native-tls feature flags)
-- [ ] Other admin endpoints (PATCH/DELETE/GET, error queries, etc.)
+- [ ] Error queries (per-job failure history)
 - [ ] Cron entry management
 
 ## Taster

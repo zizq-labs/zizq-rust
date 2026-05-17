@@ -24,7 +24,9 @@ use crate::error::ZizqError;
 use crate::failure::FailureBuilder;
 use crate::format::Format;
 use crate::job::JobKind;
+use crate::job_patch::JobPatch;
 use crate::list_jobs::ListJobsBuilder;
+use crate::patch_jobs::PatchJobsBuilder;
 use crate::resources::{BackoffConfig, Job, RetentionConfig};
 use crate::take::{TakeBuilder, TakeStream};
 use crate::unique_key::UniqueScope;
@@ -370,6 +372,39 @@ impl Client {
         DeleteJobsBuilder::new(self)
     }
 
+    /// Begin a bulk `PATCH /jobs`. Returns a [`PatchJobsBuilder`]
+    /// that accumulates job-selection filters; call
+    /// [`PatchJobsBuilder::patch`] to supply the [`JobPatch`] to
+    /// apply, then `.await` to apply it to every matching job and get
+    /// the count patched.
+    ///
+    /// Shares the filter set (`status`, `queue`, `type`, `id`,
+    /// `filter`) with [`Client::list_jobs`], [`Client::count_jobs`]
+    /// and [`Client::delete_all_jobs`].
+    ///
+    /// **With no filters set, this patches every job on the server.**
+    /// A filter set to an explicitly empty set (e.g. `.status([])`)
+    /// instead patches nothing and makes no request. Awaiting without
+    /// [`PatchJobsBuilder::patch`] returns [`ZizqError::MissingPatch`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, JobPatch};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Move every job on `queue_a` to `queue_b`.
+    /// let moved = client
+    ///     .patch_all_jobs()
+    ///     .queue(["queue_a"])
+    ///     .patch(JobPatch::new().move_to_queue("queue_b"))
+    ///     .await?;
+    /// println!("moved {moved} jobs");
+    /// # Ok(()) }
+    /// ```
+    pub fn patch_all_jobs(&self) -> PatchJobsBuilder<'_> {
+        PatchJobsBuilder::new(self)
+    }
+
     /// Follow a server-emitted pagination path (e.g.
     /// [`PageLinks::next`]) and decode the response as `T`.
     ///
@@ -421,6 +456,32 @@ impl Client {
         let response = self.send(reqwest::Method::DELETE, url, None).await?;
         self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
             .await
+    }
+
+    /// Patch a single job's mutable fields.
+    ///
+    /// Applies the supplied [`JobPatch`] to the job with the given id
+    /// and returns the updated [`Job`]. Fields the patch leaves
+    /// untouched are unchanged on the server.
+    ///
+    /// A job that doesn't exist surfaces as [`ZizqError::Response`]
+    /// with `status: 404`; patching a job in a terminal state
+    /// surfaces as `status: 422`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{Client, JobPatch};
+    /// # async fn run(client: &Client, job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// let job = client
+    ///     .patch_job(job_id, JobPatch::new().priority(10).ready_now())
+    ///     .await?;
+    /// println!("{} is now priority {}", job.id, job.priority);
+    /// # Ok(()) }
+    /// ```
+    pub async fn patch_job(&self, id: &str, patch: JobPatch) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id]);
+        self.patch_decoded(url, &patch).await
     }
 
     /// Begin streaming jobs from the server. Returns a [`TakeBuilder`]
@@ -595,6 +656,29 @@ impl Client {
         url: Url,
     ) -> Result<T, ZizqError> {
         self.send_decoded(reqwest::Method::DELETE, url).await
+    }
+
+    /// PATCH the given URL with an encoded [`JobPatch`] body and
+    /// decode the response as `T`. Backs both [`Client::patch_job`]
+    /// and the bulk [`PatchJobsBuilder`].
+    pub(crate) async fn patch_decoded<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        patch: &JobPatch,
+    ) -> Result<T, ZizqError> {
+        let bytes = encode_body(patch, self.inner.format)?;
+        let response = self.send(reqwest::Method::PATCH, url, Some(bytes)).await?;
+        let status = response.status();
+        let format = self.response_format(&response);
+        let body_bytes = response.bytes().await?;
+        if !status.is_success() {
+            let message = extract_error_message(&body_bytes, format);
+            return Err(ZizqError::Response {
+                status: status.as_u16(),
+                message,
+            });
+        }
+        decode_body(&body_bytes, format)
     }
 
     /// Issue a bodyless request and decode the response body as `T`.

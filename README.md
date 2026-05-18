@@ -43,10 +43,9 @@ self-contained job queue server.
 - [x] Server introspection: `health`, `server_version`, `list_queues`
 - [x] HTTPS / TLS — custom root CA and mutual-TLS client identity,
       with a `rustls-tls` (default) or `native-tls` feature flag
-
-## What's not done yet
-
-- [ ] Cron entry management
+- [x] Cron scheduling: `list_crons`, `get_cron`, `replace_cron`,
+      `delete_cron`, per-group and per-entry pause/resume, and
+      single-entry CRUD (`add`/`get`/`put`/`delete_cron_entry`)
 
 ## Taster
 

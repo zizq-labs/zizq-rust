@@ -18,6 +18,7 @@ use url::Url;
 
 use crate::bulk_enqueue::BulkEnqueueBuilder;
 use crate::count_jobs::CountJobsBuilder;
+use crate::cron::{CronEntry, CronEntryRecord, CronGroup, ReplaceCronBuilder};
 use crate::delete_jobs::DeleteJobsBuilder;
 use crate::enqueue::EnqueueBuilder;
 use crate::error::ZizqError;
@@ -46,6 +47,18 @@ struct VersionResponse {
 #[derive(serde::Deserialize)]
 struct QueuesResponse {
     queues: Vec<String>,
+}
+
+/// Response envelope for `GET /crons`.
+#[derive(serde::Deserialize)]
+struct CronsResponse {
+    crons: Vec<String>,
+}
+
+/// Request body for the cron pause/resume `PATCH` endpoints.
+#[derive(serde::Serialize)]
+struct PausedBody {
+    paused: bool,
 }
 
 /// Connection handle to a Zizq server.
@@ -332,6 +345,199 @@ impl Client {
         let url = self.url(&["queues"]);
         let resp: QueuesResponse = self.get_decoded(url).await?;
         Ok(resp.queues)
+    }
+
+    /// List the names of all cron groups on the server.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// for group in client.list_crons().await? {
+    ///     println!("cron group: {group}");
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn list_crons(&self) -> Result<Vec<String>, ZizqError> {
+        let url = self.url(&["crons"]);
+        let resp: CronsResponse = self.get_decoded(url).await?;
+        Ok(resp.crons)
+    }
+
+    /// Fetch a cron group and its entries by name.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    ///
+    /// A group that doesn't exist surfaces as [`ZizqError::Response`]
+    /// with `status: 404`.
+    pub async fn get_cron(&self, name: &str) -> Result<CronGroup, ZizqError> {
+        let url = self.url(&["crons", name]);
+        self.get_decoded(url).await
+    }
+
+    /// Begin replacing a cron group's entry set.
+    ///
+    /// Ths method is designed to work in application startup code. It is
+    /// atomic and idempotent so there is no need to designate one particular
+    /// app instance as the one that defines the schedule.
+    ///
+    /// Returns a [`ReplaceCronBuilder`]; chain
+    /// [`entry`](ReplaceCronBuilder::entry) per entry, then `.await`
+    /// to atomically install them, returning the resulting
+    /// [`CronGroup`].
+    ///
+    /// Entries not included are removed; the group is created if it
+    /// doesn't already exist.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use serde::{Deserialize, Serialize};
+    /// # use zizq::{Client, CronEntry, JobKind};
+    /// # #[derive(Serialize, Deserialize)]
+    /// # struct Cleanup;
+    /// # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// client
+    ///     .replace_cron("maintenance")
+    ///     .entry(CronEntry::new("cleanup", "0 0 * * *", client.enqueue(Cleanup)))
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn replace_cron(&self, name: impl Into<String>) -> ReplaceCronBuilder<'_> {
+        ReplaceCronBuilder::new(self, name.into())
+    }
+
+    /// Delete a cron group and all its entries.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn delete_cron(&self, name: &str) -> Result<(), ZizqError> {
+        let url = self.url(&["crons", name]);
+        let response = self.send(reqwest::Method::DELETE, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
+            .await
+    }
+
+    /// Pause a whole cron group.
+    ///
+    /// None of its entries enqueue while the group is paused, even if the
+    /// individual entries are not paused.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn pause_cron(&self, name: &str) -> Result<(), ZizqError> {
+        self.patch_paused(self.url(&["crons", name]), true).await
+    }
+
+    /// Resume a paused cron group.
+    ///
+    /// Any paused entries remain paused.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn resume_cron(&self, name: &str) -> Result<(), ZizqError> {
+        self.patch_paused(self.url(&["crons", name]), false).await
+    }
+
+    /// Add a single entry to a cron group, returning the stored
+    /// [`CronEntryRecord`].
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn add_cron_entry(
+        &self,
+        group: &str,
+        entry: CronEntry,
+    ) -> Result<CronEntryRecord, ZizqError> {
+        let body = entry.into_body()?;
+        let url = self.url(&["crons", group, "entries"]);
+        self.send_body_decoded(reqwest::Method::POST, url, body)
+            .await
+    }
+
+    /// Fetch a single cron entry by group and entry name.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn get_cron_entry(
+        &self,
+        group: &str,
+        entry: &str,
+    ) -> Result<CronEntryRecord, ZizqError> {
+        let url = self.url(&["crons", group, "entries", entry]);
+        self.get_decoded(url).await
+    }
+
+    /// Atomically create or replace a single cron entry.
+    ///
+    /// This method is idempotent. The entry name is taken from the supplied
+    /// [`CronEntry`].
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn put_cron_entry(
+        &self,
+        group: &str,
+        entry: CronEntry,
+    ) -> Result<CronEntryRecord, ZizqError> {
+        let body = entry.into_body()?;
+        let url = self.url(&["crons", group, "entries", body.name.as_str()]);
+        self.send_body_decoded(reqwest::Method::PUT, url, body)
+            .await
+    }
+
+    /// Delete a single cron entry.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn delete_cron_entry(&self, group: &str, entry: &str) -> Result<(), ZizqError> {
+        let url = self.url(&["crons", group, "entries", entry]);
+        let response = self.send(reqwest::Method::DELETE, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
+            .await
+    }
+
+    /// Pause a single cron entry.
+    ///
+    /// The server stops enqueueing jobs for that entry but (as long as the
+    /// group itself is not paused) continues enqueueing jobs for other
+    /// entries.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn pause_cron_entry(&self, group: &str, entry: &str) -> Result<(), ZizqError> {
+        self.patch_paused(self.url(&["crons", group, "entries", entry]), true)
+            .await
+    }
+
+    /// Resume a single paused cron entry.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn resume_cron_entry(&self, group: &str, entry: &str) -> Result<(), ZizqError> {
+        self.patch_paused(self.url(&["crons", group, "entries", entry]), false)
+            .await
     }
 
     /// Fetch a single job by id.
@@ -796,6 +1002,47 @@ impl Client {
             });
         }
         decode_body(&body_bytes, format)
+    }
+
+    /// Send `body` (encoded in the configured format) via `method`
+    /// and decode the response as `T`. For endpoints that both take
+    /// and return a body — the cron create / replace operations.
+    ///
+    /// `body` is taken by value: the cron bodies hold a type-erased
+    /// `Send`-but-not-`Sync` payload, so a `&B` captured across the
+    /// `await` would make the future non-`Send`.
+    pub(crate) async fn send_body_decoded<B, T>(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+        body: B,
+    ) -> Result<T, ZizqError>
+    where
+        B: Serialize,
+        T: DeserializeOwned,
+    {
+        let bytes = encode_body(&body, self.inner.format)?;
+        let response = self.send(method, url, Some(bytes)).await?;
+        let status = response.status();
+        let format = self.response_format(&response);
+        let body_bytes = response.bytes().await?;
+        if !status.is_success() {
+            let message = extract_error_message(&body_bytes, format);
+            return Err(ZizqError::Response {
+                status: status.as_u16(),
+                message,
+            });
+        }
+        decode_body(&body_bytes, format)
+    }
+
+    /// PATCH a cron pause/resume endpoint with `{"paused": ...}`,
+    /// expecting `200 OK` and discarding the echoed body.
+    async fn patch_paused(&self, url: Url, paused: bool) -> Result<(), ZizqError> {
+        let bytes = encode_body(&PausedBody { paused }, self.inner.format)?;
+        let response = self.send(reqwest::Method::PATCH, url, Some(bytes)).await?;
+        self.expect_status(response, &[reqwest::StatusCode::OK])
+            .await
     }
 
     /// Issue a bodyless request and decode the response body as `T`.

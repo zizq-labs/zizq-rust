@@ -19,7 +19,9 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Notify;
-use zizq::{jq_contains, jq_eq, Client, JobKind, JobPatch, Router, Worker, ZizqError};
+use zizq::{
+    jq_contains, jq_eq, Client, CronEntry, JobKind, JobPatch, Router, Worker, ZizqError,
+};
 
 /// A job kind carrying an arbitrary JSON payload. The macro stamps
 /// out one struct per API job-type name we need to tell apart in
@@ -377,4 +379,68 @@ async fn error_history() {
     let record = client.get_error(&job.id, 1).await.expect("get_error");
     assert_eq!(record.attempt, 1);
     assert_eq!(record.message, "boom");
+}
+
+#[tokio::test]
+async fn cron_schedule_lifecycle() {
+    let client = fresh().await;
+
+    // Cron is a Pro-licensed feature — on a server without a Pro
+    // license `replace_cron` answers 403, in which case we skip the
+    // rest of the scenario (mirroring the Node/Ruby suites).
+    let group = match client
+        .replace_cron("integration-cron")
+        .entry(CronEntry::new("a", "* * * * *", client.enqueue(Alpha(json!({})))))
+        .entry(CronEntry::new("b", "*/5 * * * *", client.enqueue(Beta(json!({})))))
+        .await
+    {
+        Ok(group) => group,
+        Err(ZizqError::Response { status: 403, .. }) => return,
+        Err(e) => panic!("replace_cron failed: {e:?}"),
+    };
+    assert_eq!(group.entries.len(), 2);
+
+    // Re-fetch and confirm both entries are present.
+    let fetched = client.get_cron("integration-cron").await.expect("get_cron");
+    let mut names: Vec<&str> = fetched.entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["a", "b"]);
+
+    // Pause then resume a single entry.
+    client
+        .pause_cron_entry("integration-cron", "a")
+        .await
+        .expect("pause entry");
+    assert!(
+        client
+            .get_cron_entry("integration-cron", "a")
+            .await
+            .expect("get entry")
+            .paused
+    );
+    client
+        .resume_cron_entry("integration-cron", "a")
+        .await
+        .expect("resume entry");
+    assert!(
+        !client
+            .get_cron_entry("integration-cron", "a")
+            .await
+            .expect("get entry")
+            .paused
+    );
+
+    // The group shows up in the listing.
+    assert!(client
+        .list_crons()
+        .await
+        .expect("list_crons")
+        .iter()
+        .any(|g| g == "integration-cron"));
+
+    // Clean up after ourselves.
+    client
+        .delete_cron("integration-cron")
+        .await
+        .expect("delete_cron");
 }

@@ -1,0 +1,17 @@
+[package]
+name = "zizq-integration"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The `zizq` dependency is a `path` dependency pointing at `./zizq`,
+# which `run.sh` populates by extracting the packaged `.crate`
+# artifact. The integration tests therefore build against the exact
+# published artifact, not the local source tree. The path is stable
+# (always `./zizq`) regardless of the crate version.
+[dev-dependencies]
+zizq = { path = "zizq" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

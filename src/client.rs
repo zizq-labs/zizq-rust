@@ -1359,18 +1359,34 @@ mod tests {
         assert_eq!(c.inner.format, Format::Json);
     }
 
+    // A self-signed certificate used only to exercise the
+    // `ca_certificate` path. Any structurally valid X.509 PEM works —
+    // `from_pem` validates structure, not expiry or trust — and both
+    // TLS backends accept it, so `build()` succeeds on each.
+    #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
+    const TEST_CA_PEM: &str = r"-----BEGIN CERTIFICATE-----
+MIIBnTCCAUOgAwIBAgIUcfrYrCgCM8VSL6muTiIi8/Y45GwwCgYIKoZIzj0EAwIw
+IzEhMB8GA1UEAwwYWml6cSBJbnRlZ3JhdGlvbiBUZXN0IENBMCAXDTI2MDUxODAy
+MDc0MVoYDzIxMjYwNDI0MDIwNzQxWjAjMSEwHwYDVQQDDBhaaXpxIEludGVncmF0
+aW9uIFRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATvSukyaa99rcAx
+R7CJLJSvChRUcavz6BN2i5rZ77Td8BSIKB+dgpkG3dgzNJ4d4C/JxNwdcF4B0s0m
+rXakDgS3o1MwUTAdBgNVHQ4EFgQUUtSK3JDApr7iaYVpSTWyb0AzJ1wwHwYDVR0j
+BBgwFoAUUtSK3JDApr7iaYVpSTWyb0AzJ1wwDwYDVR0TAQH/BAUwAwEB/zAKBggq
+hkjOPQQDAgNIADBFAiB9tdENdfZk5A+V7ZlLaNvmGAuJttiJj+suqaQKnPldbwIh
+APnAuEnVMvprU8ee2be2MgQmflBIUfoX18Cgi+QsoQ61
+-----END CERTIFICATE-----
+";
+
     #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
     #[test]
     fn build_accepts_a_ca_certificate() {
-        // reqwest stores the root certificate and defers its
-        // validation to connection time, so `build()` itself can't
-        // fail on a bad CA — this exercises the `ca_certificate`
-        // wiring through `apply_tls` and confirms it builds cleanly.
-        let built = Client::builder()
+        // A valid CA certificate flows through `apply_tls` and is
+        // accepted by both TLS backends.
+        Client::builder()
             .url("https://localhost:7890")
-            .ca_certificate("placeholder ca pem")
-            .build();
-        assert!(built.is_ok());
+            .ca_certificate(TEST_CA_PEM)
+            .build()
+            .expect("a valid CA certificate should be accepted");
     }
 
     #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]

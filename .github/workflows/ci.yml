@@ -120,7 +120,13 @@ jobs:
         run: echo "version=$(cargo pkgid | sed 's/.*[#@]//')" >> "$GITHUB_OUTPUT"
 
       - name: Build release artifact
-        run: ./release.sh
+        run: |
+          # Drop any packaged artifacts a restored `target/` cache
+          # carries forward from an earlier version's build, so they
+          # don't accumulate in the cache indefinitely. The upload
+          # path is version-pinned regardless, so this is hygiene.
+          rm -f target/release/zizq-*
+          ./release.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -131,19 +137,47 @@ jobs:
             target/release/zizq-${{ steps.version.outputs.version }}.crate.sha256
 
   # --- Integration ---
-  # TODO: wire up a real integration suite, mirroring the Ruby/Node
-  # clients. It should download the server binary from zizq-labs/zizq
-  # releases (via CROSS_REPO_TOKEN), pull the packaged client from the
-  # zizq-rust-package artifact above, and run an integration/run.sh
-  # against the pair. For now this is a no-op so the Gate's check name
-  # stays stable when the real suite lands.
+  # Builds the packaged `.crate` artifact against a real Zizq server:
+  # downloads a major-version-compatible server build from the
+  # zizq-labs/zizq repo (via CROSS_REPO_TOKEN), pulls the packaged
+  # client from the zizq-rust-package artifact, and runs the
+  # integration suite against the pair.
 
   integration:
     name: Integration
     needs: package
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Integration suite not yet implemented; skipping (TODO)."
+      - uses: actions/checkout@v5
+        with:
+          path: client
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Find and download latest compatible server build
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_TOKEN }}
+        run: |
+          version="${{ needs.package.outputs.version }}"
+          client/.github/scripts/find-server-build.sh "${version%%.*}" server
+
+      - name: Download client artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: zizq-rust-package
+          path: artifact
+
+      - name: Run integration tests
+        working-directory: client
+        env:
+          ZIZQ_LICENSE_KEY: ${{ secrets.ZIZQ_LICENSE_KEY }}
+        run: |
+          ARGS=(--binary ${{ github.workspace }}/server/zizq --crate ${{ github.workspace }}/artifact/zizq-*.crate)
+          if [[ -n "$ZIZQ_LICENSE_KEY" ]]; then
+            ARGS+=(--license-key "$ZIZQ_LICENSE_KEY")
+          fi
+          ./integration/run.sh "${ARGS[@]}"
 
   gate:
     name: Gate

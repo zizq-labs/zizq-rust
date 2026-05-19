@@ -206,6 +206,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # `cargo publish` re-packages the crate from source (it cannot
+      # consume a pre-built `.crate`) and refuses to run on a dirty
+      # working tree. Run it first, before the steps below create
+      # `artifacts/` and `release-notes.md` — and, since it is the
+      # irreversible step, a failure here leaves nothing else done.
+      #
+      # `--no-verify` skips the redundant verification rebuild: the
+      # `test` and `integration` jobs have already built and tested
+      # this crate (integration builds the packaged `.crate` itself).
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-verify
+
       - name: Download package artifact
         uses: actions/download-artifact@v7
         with:
@@ -227,8 +241,3 @@ jobs:
             --notes-file release-notes.md \
             "artifacts/zizq-${version}.crate" \
             "artifacts/zizq-${version}.crate.sha256"
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish

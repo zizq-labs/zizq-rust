@@ -53,7 +53,7 @@ use crate::unique_key::UniqueKey;
 ///     const PRIORITY: Option<u16> = Some(50);
 ///
 ///     fn unique_key(&self) -> Option<UniqueKey> {
-///         Some(UniqueKey::raw(format!("send_email:{}", self.to)))
+///         Some(UniqueKey::tagged_hash_of(Self::NAME, &self.to))
 ///     }
 /// }
 /// ```

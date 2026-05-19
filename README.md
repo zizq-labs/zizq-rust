@@ -3,51 +3,62 @@
 Official Rust client for [Zizq](https://zizq.io), a high-performance,
 self-contained job queue server.
 
-> **Status: active development.** This crate is incomplete and the API
-> is expected to change. It is **not yet ready for public use**. There
-> is no release on crates.io, and breaking changes can land at any time.
-
 [![CI](https://github.com/zizq-labs/zizq-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/zizq-labs/zizq-rust/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/zizq.svg)](https://crates.io/crates/zizq)
 
-## What's working
+## Installation
 
-- [x] `Client` + builder, with configurable connect/read timeouts and
+Add the crate with Cargo:
+
+```shell
+cargo add zizq
+```
+
+The minimum supported Rust version is **1.85**. Client and server share
+version numbers — keep the client's major/minor at or below the server's.
+
+### TLS
+
+TLS support is behind a feature flag; enable exactly one. `rustls-tls` (the
+default) is pure Rust with no system OpenSSL dependency; `native-tls` uses the
+platform's native TLS library.
+
+```toml
+[dependencies]
+zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
+```
+
+## Features
+
+- `Client` + builder, with configurable connect/read timeouts and
       TCP keep-alive
-- [x] HTTP/2 transport (h2c) for request/response endpoints, with
-      multiplexing on a single connection; dedicated HTTP/1.1 pool for
-      the long-lived take stream
-- [x] JSON or MessagePack wire formats (MessagePack by default)
-- [x] `JobKind` trait for per-type defaults (queue, priority, retry
+- JSON or MessagePack API formats (MessagePack by default)
+- `JobKind` trait for per-type defaults (queue, priority, retry
       limit, backoff, retention, uniqueness key)
-- [x] Single-job enqueue via a fluent builder that resolves trait
+- Single-job enqueue via a builder that resolves trait
       defaults and per-call overrides
-- [x] Bulk enqueue — many jobs submitted in a single request
-- [x] Streaming `/jobs/take` with NDJSON and length-prefixed
-      MessagePack framing; heartbeats filtered transparently
-- [x] Job acknowledgement: `report_success`, `report_success_bulk`
-      (batched ack for high-throughput workers), and `report_failure`
-      with retry / kill controls
-- [x] Structured error decoding that honours the server's
-      `Content-Type` (handles 406 Not Acceptable correctly)
-- [x] `Worker` — long-running consumer with bounded concurrency,
+- Bulk enqueue — many jobs submitted in a single request
+- `Worker` — long-running consumer with bounded concurrency,
       auto-reconnect, batched acks, retry-aware nack, and graceful
       shutdown
-- [x] `Router` — type-driven dispatch keyed by `JobKind::NAME`, so
+- `Router` — type-driven dispatch keyed by `JobKind::NAME`, so
       one worker can serve many job types
-- [x] Job queries: `get_job`, paginated `list_jobs`, and `count_jobs`
-- [x] Job mutation: single (`patch_job` / `delete_job`) and bulk
+- Job queries: `get_job`, paginated `list_jobs`, and `count_jobs`
+- Job mutation: single (`patch_job` / `delete_job`) and bulk
       (`patch_all_jobs` / `delete_all_jobs`), the bulk forms sharing a
       filter set (status / queue / type / id / jq payload expression)
-- [x] Per-job error history: `list_errors` (paginated, streamable)
+- Per-job error history: `list_errors` (paginated, streamable)
       and `get_error`
-- [x] Server introspection: `health`, `server_version`, `list_queues`
-- [x] HTTPS / TLS — custom root CA and mutual-TLS client identity,
+- Server introspection: `health`, `server_version`, `list_queues`
+- HTTPS / TLS — custom root CA and mutual-TLS client identity,
       with a `rustls-tls` (default) or `native-tls` feature flag
-- [x] Cron scheduling: `list_crons`, `get_cron`, `replace_cron`,
+- Cron scheduling: `list_crons`, `get_cron`, `replace_cron`,
       `delete_cron`, per-group and per-entry pause/resume, and
       single-entry CRUD (`add`/`get`/`put`/`delete_cron_entry`)
 
-## Taster
+## Sample Usage
+
+Read the [docs](https://zizq.io/docs/clients/rust/) for complete documentation.
 
 ### Producer
 
@@ -148,6 +159,44 @@ arrives for a type the router doesn't know about, or its payload
 doesn't deserialise into the route's input, the worker reports it as
 a failure on the same path as a handler error.
 
+### Recurring jobs (cron)
+
+`replace_cron` installs a cron schedule — each entry pairs a cron expression
+with a job to enqueue on every tick. Cron requires a Pro license on the
+server.
+
+```rust
+use serde::{Deserialize, Serialize};
+use zizq::{Client, CronEntry, JobKind};
+
+#[derive(Serialize, Deserialize)]
+struct NightlyCleanup;
+impl JobKind for NightlyCleanup {
+    const NAME: &'static str = "nightly_cleanup";
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::builder()
+        .url("http://127.0.0.1:7890")
+        .build()?;
+
+    client
+        .replace_cron("maintenance")
+        .entry(CronEntry::new(
+            "cleanup",
+            "0 0 * * *",                       // every day at midnight
+            client.enqueue(NightlyCleanup),
+        ))
+        .await?;
+
+    Ok(())
+}
+```
+
+A `CronEntry` is built from the same `enqueue(...)` builder you'd use to
+enqueue the job directly. The server then enqueues that job on schedule.
+
 ### Lower-level API
 
 If you'd rather coordinate dispatch yourself, the worker is built on
@@ -160,7 +209,7 @@ reconnect logic without `Router`'s type-driven dispatch.
 
 ## Resources
 
-* [Rust Client Docs](https://zizq.io/docs/clients/rust/) - TODO
+* [Rust Client Docs](https://zizq.io/docs/clients/rust/)
 * [Getting Started Docs](https://zizq.io/docs/getting-started/)
 * [Zizq Command Reference](https://zizq.io/docs/cli/)
 * [Zizq Rust Client Source](https://github.com/zizq-labs/zizq-rust)

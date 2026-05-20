@@ -150,17 +150,19 @@ impl Router {
     /// Register a typed handler for one [`JobKind`].
     ///
     /// The handler receives `T` (deserialised from `job.payload`) and
-    /// returns a `Result<(), E>` where `E` is any
-    /// `std::error::Error + Send + Sync + 'static` — same shape as
-    /// the worker's [`JobHandler`] blanket impl, just with `T` in the
-    /// input position instead of [`Job`]. Returns `self` for
-    /// chaining.
+    /// returns a `Result<(), E>` where `E` is any error that can be
+    /// boxed into `Box<dyn Error + Send + Sync + 'static>` — same
+    /// shape as the worker's [`JobHandler`] blanket impl, just with
+    /// `T` in the input position instead of [`Job`]. Typed errors
+    /// (e.g. via `thiserror`), `anyhow::Error`, and
+    /// `Box<dyn Error + Send + Sync>` itself all satisfy this. Returns
+    /// `self` for chaining.
     pub fn route<T, F, Fut, E>(mut self, handler: F) -> Self
     where
         T: JobKind,
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), E>> + Send + 'static,
-        E: StdError + Send + Sync + 'static,
+        E: Into<Box<dyn StdError + Send + Sync + 'static>> + 'static,
     {
         let erased: ErasedRouteHandler = Box::new(move |job: Job| {
             let payload = job.payload.unwrap_or(serde_json::Value::Null);
@@ -363,6 +365,29 @@ mod tests {
             err.type_name,
         );
         assert_eq!(err.message, "payload had an unprocessable field");
+    }
+
+    #[tokio::test]
+    async fn handler_returning_box_dyn_error_is_accepted() {
+        // Adopter pattern: many error sources unified by returning a
+        // boxed trait object. The relaxed bound on `route` accepts
+        // this directly — no wrapper struct required.
+        let router = Router::new().route(|_job: SendEmail| async move {
+            let e: Box<dyn StdError + Send + Sync> = "something went wrong".to_string().into();
+            Err::<(), _>(e)
+        });
+
+        let err = router
+            .handle(make_job("send_email", json!({ "to": "x" })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "something went wrong");
+        // Type-erased return: type_name reflects the box itself.
+        assert!(
+            err.type_name.contains("Box<"),
+            "expected boxed type name, got {}",
+            err.type_name,
+        );
     }
 
     #[tokio::test]

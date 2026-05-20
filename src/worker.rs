@@ -43,14 +43,15 @@ const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Captured error info from a handler invocation.
 ///
-/// Built from the handler's concrete error type via
-/// [`std::any::type_name`] and [`Display`](std::fmt::Display); the
-/// `type_name` is monomorphised at the handler's call site so it
-/// reflects the actual error type chosen by the user (e.g.
+/// Built from the handler's error type via [`std::any::type_name`]
+/// and [`Display`](std::fmt::Display); the `type_name` is
+/// monomorphised at the handler's call site so it reflects the
+/// actual error type chosen by the user (e.g.
 /// `"myapp::errors::WorkerError"`), unless the handler returns a
-/// type-erased error wrapper like `anyhow::Error` — in which case
-/// the wrapper's chain is captured in `message` and `type_name` is
-/// the wrapper itself.
+/// type-erased error wrapper like `anyhow::Error` or
+/// `Box<dyn Error + Send + Sync>` — in which case the wrapper's
+/// chain is captured in `message` and `type_name` is the wrapper
+/// itself.
 ///
 /// Note: backtraces are not captured yet. Doing so generically across
 /// error types requires `std::error::Error::provide` /
@@ -72,16 +73,27 @@ pub struct HandlerError {
 }
 
 impl HandlerError {
-    /// Build a `HandlerError` from any `std::error::Error`. Captures
-    /// the static type name of `E` and the `Display` form of the
-    /// value. `pub(crate)` so the [`Router`] can reuse it for its
-    /// own synthesised errors.
+    /// Build a `HandlerError` from any error that can be boxed.
+    /// Captures the static type name of `E` and the `Display` form
+    /// of the value (after boxing). `pub(crate)` so the [`Router`]
+    /// can reuse it for its own synthesised errors.
+    ///
+    /// The bound is `Into<Box<dyn Error + Send + Sync + 'static>>`
+    /// rather than the stricter `Error + Send + Sync + 'static`, so
+    /// handlers may return `anyhow::Error` or `Box<dyn Error + Send + Sync>`
+    /// directly without an intermediate wrapper. The captured
+    /// `type_name` still reflects the handler's declared error type:
+    /// concrete types (e.g. `MyError`) report as such, and only
+    /// type-erased returns surface their wrapper.
     ///
     /// [`Router`]: crate::Router
-    pub(crate) fn from_typed<E: StdError + Send + Sync + 'static>(e: E) -> Self {
+    pub(crate) fn from_typed<E>(e: E) -> Self
+    where
+        E: Into<Box<dyn StdError + Send + Sync + 'static>>,
+    {
         Self {
             type_name: type_name::<E>(),
-            message: e.to_string(),
+            message: e.into().to_string(),
         }
     }
 }
@@ -99,9 +111,12 @@ impl StdError for HandlerError {}
 ///
 /// A blanket impl is provided for any closure of the shape
 /// `Fn(Job) -> impl Future<Output = Result<(), E>>`, where `E` is
-/// any `std::error::Error` that's `Send + Sync + 'static`. So most
-/// users never name this trait directly — they hand a closure to
-/// [`WorkerBuilder::handler`] and the blanket impl applies.
+/// any error that can be boxed into
+/// `Box<dyn Error + Send + Sync + 'static>` — typed errors,
+/// `anyhow::Error`, and `Box<dyn Error + Send + Sync>` itself all
+/// satisfy this. So most users never name this trait directly —
+/// they hand a closure to [`WorkerBuilder::handler`] and the
+/// blanket impl applies.
 ///
 /// Both common closure spellings work:
 ///
@@ -129,7 +144,7 @@ impl<F, Fut, E> JobHandler for F
 where
     F: Fn(Job) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), E>> + Send + 'static,
-    E: StdError + Send + Sync + 'static,
+    E: Into<Box<dyn StdError + Send + Sync + 'static>> + 'static,
 {
     fn handle(&self, job: Job) -> Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>> {
         let fut = self(job);

@@ -17,6 +17,7 @@ use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::time::Duration;
 
+use serde::{Serialize, Serializer};
 use time::OffsetDateTime;
 
 use crate::client::{Client, EnqueueRequest};
@@ -189,7 +190,17 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
         // `serde_json::Value` intermediate allocation. `T: JobKind`
         // already requires `Send + 'static`, which is enough to
         // satisfy the dyn-trait bound here.
-        let payload: Box<dyn erased_serde::Serialize + Send> = Box::new(self.payload);
+        //
+        // Zero-sized payload types (`struct Foo;`) go through a thin
+        // serializer wrapper that re-emits `serialize_unit_struct`
+        // calls as plain `serialize_unit` — see [`ZstPayload`] for the
+        // why. Non-ZST payloads (the common case) take the fast path
+        // with no wrapper overhead.
+        let payload: Box<dyn erased_serde::Serialize + Send> = if std::mem::size_of::<T>() == 0 {
+            Box::new(ZstPayload(self.payload))
+        } else {
+            Box::new(self.payload)
+        };
         Ok(EnqueueRequest {
             job_type: T::NAME,
             queue,
@@ -220,6 +231,187 @@ impl<'a, T: JobKind> IntoFuture for EnqueueBuilder<'a, T> {
             let req = self.into_request()?;
             client.enqueue_raw(req).await
         })
+    }
+}
+
+// --- ZST payload encoding ---------------------------------------------------
+//
+// Why this exists: `rmp_serde::to_vec_named` encodes a unit struct
+// (`struct Foo;`) as MessagePack `fixarray 0` rather than `nil`. When
+// the server reads that into a `serde_json::Value` payload it becomes
+// `Value::Array([])`, which then fails to deserialize back into the
+// unit struct on the worker side via `serde_json::from_value`
+// (`expected unit struct, got sequence`). This also breaks cross-
+// language interop — a Ruby/Node consumer sees `[]` where they
+// expect `null`/`{}`.
+//
+// The fix is purely client-side: when the user's payload type is a
+// ZST (`std::mem::size_of::<T>() == 0`), wrap it in `ZstPayload<T>`
+// before type-erasing. The wrapper hands the user's `T` a tiny
+// shim `Serializer` that re-emits `serialize_unit_struct` calls as
+// plain `serialize_unit()` — producing nil/null on the wire, which
+// every format and language round-trips cleanly. Every other
+// `Serializer` method delegates straight through.
+//
+// Non-ZST payloads bypass the wrapper entirely.
+
+/// Newtype around a ZST payload that re-encodes its
+/// `serialize_unit_struct` call as plain `serialize_unit` to dodge
+/// the rmp-serde empty-fixarray quirk.
+struct ZstPayload<T>(T);
+
+impl<T: Serialize> Serialize for ZstPayload<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(ZstFixupSerializer(serializer))
+    }
+}
+
+/// Serializer shim that re-routes `serialize_unit_struct` to
+/// `serialize_unit` and delegates everything else verbatim.
+struct ZstFixupSerializer<S>(S);
+
+impl<S: Serializer> Serializer for ZstFixupSerializer<S> {
+    type Ok = S::Ok;
+    type Error = S::Error;
+    type SerializeSeq = S::SerializeSeq;
+    type SerializeTuple = S::SerializeTuple;
+    type SerializeTupleStruct = S::SerializeTupleStruct;
+    type SerializeTupleVariant = S::SerializeTupleVariant;
+    type SerializeMap = S::SerializeMap;
+    type SerializeStruct = S::SerializeStruct;
+    type SerializeStructVariant = S::SerializeStructVariant;
+
+    // The one method we intercept: emit a plain unit instead of a
+    // named unit struct (which rmp-serde mishandles).
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_unit()
+    }
+
+    // Everything else: straight delegation.
+    fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_bool(v)
+    }
+    fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_i8(v)
+    }
+    fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_i16(v)
+    }
+    fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_i32(v)
+    }
+    fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_i64(v)
+    }
+    fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_i128(v)
+    }
+    fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_u8(v)
+    }
+    fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_u16(v)
+    }
+    fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_u32(v)
+    }
+    fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_u64(v)
+    }
+    fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_u128(v)
+    }
+    fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_f32(v)
+    }
+    fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_f64(v)
+    }
+    fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_char(v)
+    }
+    fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_str(v)
+    }
+    fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_bytes(v)
+    }
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_none()
+    }
+    fn serialize_some<V: ?Sized + Serialize>(self, value: &V) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_some(value)
+    }
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_unit()
+    }
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        idx: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_unit_variant(name, idx, variant)
+    }
+    fn serialize_newtype_struct<V: ?Sized + Serialize>(
+        self,
+        name: &'static str,
+        value: &V,
+    ) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_newtype_struct(name, value)
+    }
+    fn serialize_newtype_variant<V: ?Sized + Serialize>(
+        self,
+        name: &'static str,
+        idx: u32,
+        variant: &'static str,
+        value: &V,
+    ) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_newtype_variant(name, idx, variant, value)
+    }
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        self.0.serialize_seq(len)
+    }
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        self.0.serialize_tuple(len)
+    }
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        self.0.serialize_tuple_struct(name, len)
+    }
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        idx: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        self.0.serialize_tuple_variant(name, idx, variant, len)
+    }
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        self.0.serialize_map(len)
+    }
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        self.0.serialize_struct(name, len)
+    }
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        idx: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        self.0.serialize_struct_variant(name, idx, variant, len)
     }
 }
 
@@ -364,6 +556,72 @@ mod tests {
         assert_eq!(uk.scope, Some(UniqueScope::Exists));
         assert_eq!(parsed.payload.as_ref().unwrap()["to"], "a@b");
         assert_eq!(parsed.duplicate, None);
+    }
+
+    #[test]
+    fn zst_payload_encodes_as_null_not_empty_sequence() {
+        // Reproduces the bug: a unit struct serialised via rmp-serde
+        // would naturally become a `fixarray 0` (empty sequence) on
+        // the wire, which the server stores as `Value::Array([])` and
+        // then fails to round-trip back into the unit struct via
+        // `serde_json::from_value`. The `ZstPayload` wrapper rewrites
+        // the call to `serialize_unit`, producing `nil`/`null`.
+        #[derive(Debug, Serialize, Deserialize)]
+        struct Marker;
+        impl JobKind for Marker {
+            const NAME: &'static str = "marker";
+        }
+
+        let body = EnqueueRequest {
+            job_type: Marker::NAME,
+            queue: "default".into(),
+            payload: Box::new(ZstPayload(Marker)),
+            priority: None,
+            ready_at: None,
+            retry_limit: None,
+            backoff: None,
+            retention: None,
+            unique_key: None,
+            unique_while: None,
+        };
+
+        // MessagePack: server-side path. Decode as Value to mirror
+        // what the server does when stashing the payload.
+        let mp = encode_body(&body, Format::MessagePack).unwrap();
+        let as_value: serde_json::Value = rmp_serde::from_slice(&mp).unwrap();
+        assert_eq!(
+            as_value["payload"],
+            serde_json::Value::Null,
+            "expected nil payload on the wire; got {:?}",
+            as_value["payload"],
+        );
+
+        // And the round-trip back into the unit struct via
+        // `serde_json::from_value` — the path the router takes — now
+        // succeeds.
+        let payload = as_value["payload"].clone();
+        let _: Marker = serde_json::from_value(payload).unwrap();
+    }
+
+    #[test]
+    fn typed_payload_with_fields_is_unchanged_by_the_zst_wrapper() {
+        // Sanity check: ordinary payloads (the common case) don't
+        // change wire shape — the wrapper only kicks in for ZSTs.
+        let body = EnqueueRequest {
+            job_type: SendEmail::NAME,
+            queue: SendEmail::QUEUE.to_string(),
+            payload: Box::new(SendEmail { to: "a@b".into() }),
+            priority: None,
+            ready_at: None,
+            retry_limit: None,
+            backoff: None,
+            retention: None,
+            unique_key: None,
+            unique_while: None,
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&encode_body(&body, Format::Json).unwrap()).unwrap();
+        assert_eq!(json["payload"]["to"], "a@b");
     }
 
     #[test]

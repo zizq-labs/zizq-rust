@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.2
+
+### Fixed
+
+- **Zero-sized payloads (`struct Foo;`) now encode correctly over
+  MessagePack.** Previously, rmp-serde's default representation of a
+  unit struct was an empty fixarray, which the server stored as
+  `Value::Array([])` and which then failed to round-trip back into
+  the unit struct on the worker side (`expected unit struct, got
+  sequence`). The encoded form also broke cross-language interop —
+  Ruby/Node consumers expected `null`/`{}` for "no payload" jobs.
+  The client now wraps ZST payloads in a thin `Serializer` shim that
+  re-emits `serialize_unit_struct` as `serialize_unit`, producing
+  `nil`/`null` on the wire. Non-ZST payloads (the common case) take
+  the existing fast path with zero wrapper overhead.
+
+
 ## 0.3.1
 
 ### Added

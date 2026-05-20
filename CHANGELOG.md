@@ -2,6 +2,16 @@
 
 ## 0.3.1
 
+### Added
+
+- **`Router::with_state` and the `State<S>` extractor.** Routers can now
+  thread shared state (database pool, API clients, config) through every
+  handler — handlers built on a stateful router take `State<S>` as their
+  first argument, axum-style. Stateless handlers (`Fn(T)`) remain valid
+  on both stateless and stateful routers, so existing code keeps
+  compiling. Sub-state projection (FromRef-style) is deferred — for now,
+  combine slices into one struct and destructure inside each handler.
+
 ### Changed
 
 - **Handler error bound relaxed.** Handlers passed to `Router::route` and

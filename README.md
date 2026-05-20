@@ -42,7 +42,8 @@ zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
       auto-reconnect, batched acks, retry-aware nack, and graceful
       shutdown
 - `Router` — type-driven dispatch keyed by `JobKind::NAME`, so
-      one worker can serve many job types
+      one worker can serve many job types, with optional shared
+      state (`Router::with_state` + a `State<S>` extractor)
 - Job queries: `get_job`, paginated `list_jobs`, and `count_jobs`
 - Job mutation: single (`patch_job` / `delete_job`) and bulk
       (`patch_all_jobs` / `delete_all_jobs`), the bulk forms sharing a
@@ -158,6 +159,40 @@ reports a failure and lets the server's retry policy apply. If a job
 arrives for a type the router doesn't know about, or its payload
 doesn't deserialise into the route's input, the worker reports it as
 a failure on the same path as a handler error.
+
+#### Sharing state across handlers
+
+When several handlers need the same resources (database pool, API
+client, config), build the router with `Router::with_state(...)` and
+take a `State<S>` extractor as the handler's first argument. State is
+cloned per invocation — wrap heavy state in `Arc` so the clone is
+cheap.
+
+```rust
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::sync::Arc;
+use zizq::{JobKind, Router, State};
+
+#[derive(Serialize, Deserialize)]
+struct SendEmail { to: String }
+impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+
+#[derive(Clone)]
+struct AppState {
+    db: Arc<()>,     // your sqlx::Pool or similar
+    mailer: Arc<()>, // your mailer handle
+}
+
+let _router = Router::with_state(AppState { db: Arc::new(()), mailer: Arc::new(()) })
+    .route(async |State(ctx): State<AppState>, job: SendEmail| {
+        let _ = (ctx.db, ctx.mailer, job.to);
+        Ok::<(), Infallible>(())
+    });
+```
+
+Stateless `Fn(T)` handlers also work on a stateful router (they
+ignore the state), so you can mix the two shapes as routes are added.
 
 ### Recurring jobs (cron)
 

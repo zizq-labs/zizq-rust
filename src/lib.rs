@@ -23,8 +23,10 @@
 //! - [`Worker`] is the recommended consumer API — it streams jobs,
 //!   dispatches them to a [`JobHandler`] with bounded concurrency,
 //!   batches acks, and reconnects on transient failures. Use [`Router`]
-//!   to dispatch multiple [`JobKind`]s through one worker. For full
-//!   manual control, [`Client::take`] + [`Client::report_success`] /
+//!   to dispatch multiple [`JobKind`]s through one worker, optionally
+//!   built with [`Router::with_state`] to share a database pool, API
+//!   client, or config across handlers. For full manual control,
+//!   [`Client::take`] + [`Client::report_success`] /
 //!   [`Client::report_failure`] are the underlying primitives.
 //!
 //! The API serialization format defaults to [`Format::MessagePack`];
@@ -149,7 +151,7 @@ pub use resources::{
     BackoffConfig, ErrorPage, ErrorRecord, Job, JobPage, JobStatus, Order, PageLinks,
     RetentionConfig,
 };
-pub use router::Router;
+pub use router::{Router, State};
 pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};
 pub use worker::{HandlerError, JobHandler, Worker, WorkerBuilder};

@@ -92,6 +92,49 @@ let router = Router::new()
 
 A job whose type matches no route is failed with a routing error.
 
+### Sharing state across handlers
+
+When several handlers need the same resources (database pool, API clients,
+config), build the router with `Router::with_state(...)`. Each handler that
+needs the state takes a `State<S>` extractor as its first argument. The state
+is cloned per invocation — wrap heavy state in `Arc<...>` so clones are cheap.
+
+```rust
+# use serde::{Deserialize, Serialize};
+# use std::convert::Infallible;
+# use std::sync::Arc;
+# use zizq::{JobKind, Router, State};
+# #[derive(Serialize, Deserialize)]
+# struct SendEmail { to: String }
+# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+# #[derive(Serialize, Deserialize)]
+# struct ProcessReport { id: u64 }
+# impl JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
+#[derive(Clone)]
+struct AppState {
+    // pretend these are a database pool, mailer, etc.
+    db: Arc<()>,
+    mailer: Arc<()>,
+}
+
+let router = Router::with_state(AppState { db: Arc::new(()), mailer: Arc::new(()) })
+    .route(async |State(ctx): State<AppState>, job: SendEmail| {
+        let _ = (ctx.mailer, job.to);
+        Ok::<(), Infallible>(())
+    })
+    .route(async |State(ctx): State<AppState>, job: ProcessReport| {
+        let _ = (ctx.db, job.id);
+        Ok::<(), Infallible>(())
+    });
+```
+
+Stateless handlers (`Fn(T)`) are also accepted on a stateful router — they
+just ignore the state, so an additional route that needs no resources can be
+added without restructuring. For sub-state projection (one router, several
+handlers each wanting a different slice), keep one combined state struct and
+destructure it inside each handler — finer-grained extraction is on the
+roadmap.
+
 ## Concurrency
 
 `concurrency` sets how many job handlers may run at once. The default is `1`

@@ -36,6 +36,38 @@
 //! # }
 //! ```
 //!
+//! ## Sharing state across handlers
+//!
+//! For shared resources (database pool, API clients, config), build
+//! the router with [`Router::with_state`]. Each handler then accepts
+//! a [`State<S>`] extractor as its first argument:
+//!
+//! ```no_run
+//! # use serde::{Deserialize, Serialize};
+//! # use std::convert::Infallible;
+//! # use std::sync::Arc;
+//! # use zizq::{JobKind, Router, State};
+//! # #[derive(Serialize, Deserialize)]
+//! # struct SendEmail { to: String }
+//! # impl JobKind for SendEmail {
+//! #     const NAME: &'static str = "send_email";
+//! # }
+//! #[derive(Clone)]
+//! struct AppState { mailer: Arc<()> /* ... */ }
+//!
+//! let router = Router::with_state(AppState { mailer: Arc::new(()) })
+//!     .route(async |State(ctx): State<AppState>, job: SendEmail| {
+//!         let _ = (ctx.mailer, job.to);
+//!         Ok::<(), Infallible>(())
+//!     });
+//! # let _ = router;
+//! ```
+//!
+//! `S` is cloned into each route at registration time and into each
+//! handler invocation — wrap heavy state in [`Arc`](std::sync::Arc) so
+//! the clone is cheap. Stateless `Fn(T)` handlers also remain valid on
+//! a stateful router: they simply ignore the state.
+//!
 //! When the router handles a job, it looks at the `Job::job_type`
 //! and finds the corresponding route handler. It then deserializes
 //! the `Job::payload` into the correct type (the `JobKind`) before
@@ -104,6 +136,32 @@ impl StdError for PayloadDeserializeError {
     }
 }
 
+/// State extractor passed to route handlers built on a stateful
+/// [`Router`]. Wraps the shared value the router was constructed
+/// with; handlers destructure it with `State(ctx)` or access the
+/// value via `state.0`.
+///
+/// See [`Router::with_state`] for the full pattern.
+#[derive(Debug, Clone, Copy)]
+pub struct State<S>(pub S);
+
+/// Trait that abstracts "anything that can be turned into a route
+/// handler" — the bridge between the user's handler closure (with
+/// or without a [`State<S>`] first argument) and the type-erased
+/// representation the router stores internally.
+///
+/// You don't normally name this trait yourself: it's implemented
+/// for the two natural handler shapes (`Fn(T)` and `Fn(State<S>, T)`)
+/// and used as the bound on [`Router::route`]. The third type
+/// parameter `Marker` is a phantom that lets the two impls coexist
+/// without overlapping — Rust infers it from the handler's actual
+/// signature.
+pub trait IntoRouteHandler<S, T, Marker> {
+    /// Erase the handler into the router's internal representation,
+    /// capturing a clone of the state for the stateful variant.
+    fn into_route_handler(self, state: S) -> ErasedRouteHandler;
+}
+
 /// Dispatch table keyed by [`JobKind::NAME`].
 ///
 /// Each [`route`](Router::route) call registers a typed handler for
@@ -111,6 +169,11 @@ impl StdError for PayloadDeserializeError {
 /// the handler for `job.job_type`, deserialises the payload into the
 /// route's input type, and calls the handler. Implements
 /// [`JobHandler`] so it can be passed to [`WorkerBuilder::handler`].
+///
+/// Routers are generic over a state type `S`, defaulting to `()`.
+/// Use [`Router::new`] for stateless dispatch or
+/// [`Router::with_state`] to thread shared resources through every
+/// handler via a [`State<S>`] extractor.
 ///
 /// Registering the same `JobKind::NAME` twice overwrites the previous
 /// entry — last call wins.
@@ -135,34 +198,112 @@ impl StdError for PayloadDeserializeError {
 /// });
 /// # let _ = router;
 /// ```
-pub struct Router {
+pub struct Router<S = ()> {
     routes: HashMap<&'static str, ErasedRouteHandler>,
+    state: S,
 }
 
-impl Router {
-    /// Create an empty router with no routes registered.
+impl Router<()> {
+    /// Create an empty stateless router with no routes registered.
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            state: (),
         }
     }
 
+    /// Create an empty router that shares `state` with every
+    /// registered handler.
+    ///
+    /// `S` is cloned once into each route at registration time, and
+    /// again into each handler invocation. Wrap large state in
+    /// [`Arc`](std::sync::Arc) (or `Arc<Mutex<_>>` for mutability) so
+    /// the clones are cheap.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::convert::Infallible;
+    /// # use std::sync::Arc;
+    /// # use zizq::{JobKind, Router, State};
+    /// # #[derive(Serialize, Deserialize)]
+    /// # struct SendEmail { to: String }
+    /// # impl JobKind for SendEmail {
+    /// #     const NAME: &'static str = "send_email";
+    /// # }
+    /// #[derive(Clone)]
+    /// struct AppState {
+    ///     // pretend this is a pool, mailer, etc.
+    ///     count: Arc<std::sync::atomic::AtomicUsize>,
+    /// }
+    ///
+    /// let state = AppState { count: Arc::new(0.into()) };
+    /// let router = Router::with_state(state)
+    ///     .route(async |State(s): State<AppState>, _job: SendEmail| {
+    ///         s.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ///         Ok::<(), Infallible>(())
+    ///     });
+    /// # let _ = router;
+    /// ```
+    pub fn with_state<S>(state: S) -> Router<S>
+    where
+        S: Clone + Send + Sync + 'static,
+    {
+        Router {
+            routes: HashMap::new(),
+            state,
+        }
+    }
+}
+
+impl<S> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     /// Register a typed handler for one [`JobKind`].
     ///
-    /// The handler receives `T` (deserialised from `job.payload`) and
-    /// returns a `Result<(), E>` where `E` is any
-    /// `std::error::Error + Send + Sync + 'static` — same shape as
-    /// the worker's [`JobHandler`] blanket impl, just with `T` in the
-    /// input position instead of [`Job`]. Returns `self` for
-    /// chaining.
-    pub fn route<T, F, Fut, E>(mut self, handler: F) -> Self
+    /// The handler can take either `T` alone or `(State<S>, T)` —
+    /// both shapes are accepted via [`IntoRouteHandler`]. It returns
+    /// a `Result<(), E>` where `E` is any error that can be boxed
+    /// into `Box<dyn Error + Send + Sync + 'static>`. Typed errors
+    /// (e.g. via `thiserror`), `anyhow::Error`, and
+    /// `Box<dyn Error + Send + Sync>` itself all satisfy this.
+    /// Returns `self` for chaining.
+    pub fn route<T, H, Marker>(mut self, handler: H) -> Self
     where
         T: JobKind,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), E>> + Send + 'static,
-        E: StdError + Send + Sync + 'static,
+        H: IntoRouteHandler<S, T, Marker>,
     {
-        let erased: ErasedRouteHandler = Box::new(move |job: Job| {
+        let erased = handler.into_route_handler(self.state.clone());
+        self.routes.insert(T::NAME, erased);
+        self
+    }
+}
+
+/// Marker type for the stateless handler shape `Fn(T)`. Only used
+/// as a phantom marker in [`IntoRouteHandler`] — never constructed.
+#[doc(hidden)]
+pub struct StatelessMarker;
+
+/// Marker type for the stateful handler shape `Fn(State<S>, T)`.
+/// Only used as a phantom marker in [`IntoRouteHandler`] — never
+/// constructed.
+#[doc(hidden)]
+pub struct StatefulMarker;
+
+/// Stateless handler shape: `Fn(T) -> impl Future<Output = Result<(), E>>`.
+/// Works on routers with any state type — the state is simply
+/// ignored.
+impl<S, T, F, Fut, E> IntoRouteHandler<S, T, StatelessMarker> for F
+where
+    T: JobKind,
+    F: Fn(T) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), E>> + Send + 'static,
+    E: Into<Box<dyn StdError + Send + Sync + 'static>> + 'static,
+{
+    fn into_route_handler(self, _state: S) -> ErasedRouteHandler {
+        Box::new(move |job: Job| {
             let payload = job.payload.unwrap_or(serde_json::Value::Null);
             let typed: T = match serde_json::from_value(payload) {
                 Ok(t) => t,
@@ -174,21 +315,51 @@ impl Router {
                     return Box::pin(async move { Err(err) });
                 }
             };
-            let fut = handler(typed);
+            let fut = self(typed);
             Box::pin(async move { fut.await.map_err(HandlerError::from_typed) })
-        });
-        self.routes.insert(T::NAME, erased);
-        self
+        })
     }
 }
 
-impl Default for Router {
+/// Stateful handler shape: `Fn(State<S>, T) -> impl Future<Output = Result<(), E>>`.
+/// The router's state is cloned per invocation. Disjoint from the
+/// stateless impl above because `Fn(T)` and `Fn(State<S>, T)` are
+/// different `Fn` trait parameterisations, so a single closure
+/// type satisfies at most one of them.
+impl<S, T, F, Fut, E> IntoRouteHandler<S, T, StatefulMarker> for F
+where
+    T: JobKind,
+    S: Clone + Send + Sync + 'static,
+    F: Fn(State<S>, T) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), E>> + Send + 'static,
+    E: Into<Box<dyn StdError + Send + Sync + 'static>> + 'static,
+{
+    fn into_route_handler(self, state: S) -> ErasedRouteHandler {
+        Box::new(move |job: Job| {
+            let payload = job.payload.unwrap_or(serde_json::Value::Null);
+            let typed: T = match serde_json::from_value(payload) {
+                Ok(t) => t,
+                Err(e) => {
+                    let err = HandlerError::from_typed(PayloadDeserializeError {
+                        target: std::any::type_name::<T>(),
+                        source: e,
+                    });
+                    return Box::pin(async move { Err(err) });
+                }
+            };
+            let fut = self(State(state.clone()), typed);
+            Box::pin(async move { fut.await.map_err(HandlerError::from_typed) })
+        })
+    }
+}
+
+impl Default for Router<()> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl std::fmt::Debug for Router {
+impl<S> std::fmt::Debug for Router<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut routes: Vec<&str> = self.routes.keys().copied().collect();
         routes.sort();
@@ -196,7 +367,10 @@ impl std::fmt::Debug for Router {
     }
 }
 
-impl JobHandler for Router {
+impl<S> JobHandler for Router<S>
+where
+    S: Send + Sync + 'static,
+{
     fn handle(&self, job: Job) -> Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>> {
         match self.routes.get(job.job_type.as_str()) {
             Some(handler) => handler(job),
@@ -363,6 +537,83 @@ mod tests {
             err.type_name,
         );
         assert_eq!(err.message, "payload had an unprocessable field");
+    }
+
+    #[tokio::test]
+    async fn handler_returning_box_dyn_error_is_accepted() {
+        // Adopter pattern: many error sources unified by returning a
+        // boxed trait object. The relaxed bound on `route` accepts
+        // this directly — no wrapper struct required.
+        let router = Router::new().route(|_job: SendEmail| async move {
+            let e: Box<dyn StdError + Send + Sync> = "something went wrong".to_string().into();
+            Err::<(), _>(e)
+        });
+
+        let err = router
+            .handle(make_job("send_email", json!({ "to": "x" })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "something went wrong");
+        // Type-erased return: type_name reflects the box itself.
+        assert!(
+            err.type_name.contains("Box<"),
+            "expected boxed type name, got {}",
+            err.type_name,
+        );
+    }
+
+    #[tokio::test]
+    async fn stateful_router_passes_state_to_handler() {
+        #[derive(Clone)]
+        struct Ctx {
+            count: Arc<AtomicUsize>,
+        }
+        let ctx = Ctx {
+            count: Arc::new(AtomicUsize::new(0)),
+        };
+        let observed = ctx.count.clone();
+
+        let router =
+            Router::with_state(ctx).route(async |State(ctx): State<Ctx>, _job: SendEmail| {
+                ctx.count.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), Infallible>(())
+            });
+
+        router
+            .handle(make_job("send_email", json!({ "to": "x" })))
+            .await
+            .unwrap();
+        router
+            .handle(make_job("send_email", json!({ "to": "y" })))
+            .await
+            .unwrap();
+
+        assert_eq!(observed.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stateful_router_accepts_stateless_handlers() {
+        // Mixing both shapes on the same router: stateless handlers
+        // simply ignore the state, which means an adopter can add a
+        // route that doesn't need shared resources without restructuring.
+        #[derive(Clone)]
+        struct Ctx;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+
+        let router = Router::with_state(Ctx).route(move |_job: SendEmail| {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), Infallible>(())
+            }
+        });
+
+        router
+            .handle(make_job("send_email", json!({ "to": "x" })))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

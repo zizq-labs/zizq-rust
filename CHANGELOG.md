@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.3
+
+### Added
+
+- **`ClientBuilder::stream_idle_timeout`** — separate per-read timeout
+  for the long-lived `/jobs/take` stream consumed by `Worker`. Defaults
+  to 30 seconds; reset by each frame received, so the server's heartbeats
+  keep it alive while only genuinely dead connections (NAT rebind,
+  firewall conntrack expiry, etc.) trigger a reconnect. Normal API traffic
+  continues to use `read_timeout` (also 30s default), so it can be
+  tightened independently without affecting the take stream.
+
+### Changed
+
+- The HTTP/1.1 take-stream pool no longer reuses `read_timeout`; its
+  per-read timeout is now `stream_idle_timeout`. Defaults are unchanged
+  (both 30s), so behaviour is preserved unless explicitly tuned.
+
+
 ## 0.3.2
 
 ### Fixed

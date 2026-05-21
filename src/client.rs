@@ -35,6 +35,7 @@ use crate::unique_key::UniqueScope;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
 /// Response envelope for `GET /version`.
@@ -1199,8 +1200,14 @@ pub struct ClientBuilder {
     /// Deadline after which initial connection fails.
     connect_timeout: Option<Duration>,
 
-    /// Deadline after which reads fail if no data is received.
+    /// Per-read timeout for normal API traffic (enqueue, queries, mutations
+    /// — anything that isn't the long-lived `/jobs/take` stream).
     read_timeout: Option<Duration>,
+
+    /// Per-read timeout for the long-lived `/jobs/take` stream.
+    /// Separate from `read_timeout` so normal API paths fail fast while the
+    /// stream tolerates idle periods up to a heartbeat-aware window.
+    stream_idle_timeout: Option<Duration>,
 
     /// PEM-encoded extra root CA certificate to trust, if any.
     #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]
@@ -1236,14 +1243,37 @@ impl ClientBuilder {
         self
     }
 
-    /// Override the per-read timeout — the maximum time between
-    /// consecutive bytes received from the server. Reset by each
-    /// incoming chunk, so heartbeats on long-lived streams keep it
-    /// fresh. Defaults to 30 seconds, which is comfortably wider than
-    /// any reasonable heartbeat cadence (default heartbeat iterval is
-    /// 3 seconds).
+    /// Override the per-read timeout for RPC traffic (enqueue,
+    /// queries, mutations — anything that isn't `/jobs/take`).
+    /// Bounds each individual socket read between the client and the
+    /// server; reset on each chunk received. Defaults to 30 seconds.
+    ///
+    /// The long-lived take stream uses its own value, configured via
+    /// [`Self::stream_idle_timeout`].
     pub fn read_timeout(mut self, d: Duration) -> Self {
         self.read_timeout = Some(d);
+        self
+    }
+
+    /// Override the per-read timeout for the long-lived
+    /// `/jobs/take` stream that the [`Worker`] consumes. Bounds the
+    /// time between consecutive bytes received from the server; the
+    /// server's heartbeats (default 3s) reset it on each frame, so
+    /// the stream only times out when the server actually goes silent.
+    ///
+    /// The resulting error surfaces as a transient stream failure
+    /// inside `Worker`, which reconnects with backoff — exactly the
+    /// path needed to recover from connections that have gone zombie
+    /// (NAT rebind, firewall conntrack expiry, etc.) without the
+    /// server's FIN reaching the client.
+    ///
+    /// Should be comfortably wider than the server's heartbeat
+    /// interval to avoid false-positive disconnects. Defaults to 30
+    /// seconds.
+    ///
+    /// [`Worker`]: crate::Worker
+    pub fn stream_idle_timeout(mut self, d: Duration) -> Self {
+        self.stream_idle_timeout = Some(d);
         self
     }
 
@@ -1320,6 +1350,9 @@ impl ClientBuilder {
 
         let connect_timeout = self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
         let read_timeout = self.read_timeout.unwrap_or(DEFAULT_READ_TIMEOUT);
+        let stream_idle_timeout = self
+            .stream_idle_timeout
+            .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT);
 
         let http2 = self
             .apply_tls(
@@ -1336,7 +1369,13 @@ impl ClientBuilder {
         // with `http1_only()` rather than relying on the default — over
         // TLS, ALPN would otherwise upgrade us to HTTP/2, which adds
         // framing overhead that we've measured as a net negative on a
-        // single long-lived stream. Liveness knobs match http2.
+        // single long-lived stream.
+        //
+        // Read timeout uses `stream_idle_timeout` rather than the RPC
+        // `read_timeout`: the take stream is intentionally long-lived,
+        // so the relevant signal is "no bytes received for X" (heartbeats
+        // reset it). The server emits a heartbeat every ~3s; this only
+        // fires on a connection that has actually gone silent.
         let http1 = self
             .apply_tls(
                 reqwest::Client::builder()
@@ -1344,7 +1383,7 @@ impl ClientBuilder {
                     .pool_idle_timeout(Some(Duration::from_secs(90)))
                     .tcp_keepalive(Some(DEFAULT_TCP_KEEPALIVE))
                     .connect_timeout(connect_timeout)
-                    .read_timeout(read_timeout),
+                    .read_timeout(stream_idle_timeout),
             )?
             .build()?;
 
@@ -1604,6 +1643,22 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(c.inner.format, Format::Json);
+    }
+
+    #[test]
+    fn build_accepts_separate_rpc_and_stream_timeouts() {
+        // Smoke test that `read_timeout` and `stream_idle_timeout`
+        // are independently settable. The actual socket-level enforcement
+        // is reqwest's job and not worth re-asserting at the unit level;
+        // the value of this test is catching API regressions if either
+        // builder method is removed or renamed.
+        Client::builder()
+            .url("http://localhost:7890")
+            .connect_timeout(Duration::from_secs(5))
+            .read_timeout(Duration::from_secs(10))
+            .stream_idle_timeout(Duration::from_secs(45))
+            .build()
+            .unwrap();
     }
 
     // A self-signed certificate used only to exercise the

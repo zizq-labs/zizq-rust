@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- **`Client::delete_all_crons`** — `DELETE /crons`. Wipes every cron
+  group on the server in a single call and returns the number of
+  groups removed. Pro-only.
+- **`Client::reset`** — `POST /reset`. Wipes every cron group and
+  every job in one request. Primarily intended as a setup/teardown
+  step for test suites that want a known-empty server between
+  scenarios. The integration suite's `fresh()` helper now uses this
+  instead of `delete_all_jobs`. Also available as
+  `Client::erase_all_data`.
+
+### Requires
+
+- Zizq server **0.4.0** or later for the new endpoints.
+
 ## 0.3.3
 
 ### Added

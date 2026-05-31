@@ -42,12 +42,12 @@ job_kind!(Alpha, "alpha");
 job_kind!(Beta, "beta");
 job_kind!(Gamma, "gamma");
 
-/// Connect to the server named by `ZIZQ_URL` and wipe every job, so
-/// each scenario starts from a known-empty state.
+/// Connect to the server named by `ZIZQ_URL` and wipe every job and
+/// cron group, so each scenario starts from a known-empty state.
 async fn fresh() -> Client {
     let url = std::env::var("ZIZQ_URL").expect("ZIZQ_URL must be set (run via run.sh)");
     let client = Client::builder().url(&url).build().expect("build client");
-    client.delete_all_jobs().await.expect("wipe jobs");
+    client.reset().await.expect("reset server");
     client
 }
 
@@ -443,4 +443,31 @@ async fn cron_schedule_lifecycle() {
         .delete_cron("integration-cron")
         .await
         .expect("delete_cron");
+}
+
+#[tokio::test]
+async fn delete_all_crons_wipes_every_group() {
+    let client = fresh().await;
+
+    // Create two cron groups (Pro-only feature — skip on free tier).
+    for name in ["wipe-a", "wipe-b"] {
+        match client
+            .replace_cron(name)
+            .entry(CronEntry::new("e", "* * * * *", client.enqueue(Alpha(json!({})))))
+            .await
+        {
+            Ok(_) => {}
+            Err(ZizqError::Response { status: 403, .. }) => return,
+            Err(e) => panic!("replace_cron({name}) failed: {e:?}"),
+        }
+    }
+
+    let deleted = client
+        .delete_all_crons()
+        .await
+        .expect("delete_all_crons");
+    assert_eq!(deleted, 2);
+
+    let remaining = client.list_crons().await.expect("list_crons");
+    assert!(remaining.is_empty(), "expected no cron groups after wipe");
 }

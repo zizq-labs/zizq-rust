@@ -432,6 +432,27 @@ impl Client {
             .await
     }
 
+    /// Delete every cron group on the server in a single call.
+    ///
+    /// Returns the number of cron groups removed.
+    ///
+    /// **Destructive.** This deletes *every cron group on the server*.
+    /// For a more granular delete, use [`Client::delete_cron`] with a
+    /// specific name.
+    ///
+    /// Cron requires a [Pro license](https://zizq.io/pricing) on the server.
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`.
+    pub async fn delete_all_crons(&self) -> Result<u64, ZizqError> {
+        #[derive(serde::Deserialize)]
+        struct DeleteResponse {
+            deleted: u64,
+        }
+        let url = self.url(&["crons"]);
+        let resp: DeleteResponse = self.delete_decoded(url).await?;
+        Ok(resp.deleted)
+    }
+
     /// Pause a whole cron group.
     ///
     /// None of its entries enqueue while the group is paused, even if the
@@ -649,6 +670,36 @@ impl Client {
     /// ```
     pub fn delete_all_jobs(&self) -> DeleteJobsBuilder<'_> {
         DeleteJobsBuilder::new(self)
+    }
+
+    /// Wipe *every* cron group and *every* job on the server.
+    ///
+    /// Equivalent to calling [`Client::delete_all_crons`] followed by
+    /// [`Client::delete_all_jobs`] (no filters), but in a single
+    /// request. Useful primarily as a setup/teardown step in tests
+    /// where you want a known-empty server between scenarios.
+    ///
+    /// **Destructive.** No filters, no escape hatch, no confirmation —
+    /// the server-side operation simply returns once everything is gone.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// client.reset().await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn reset(&self) -> Result<(), ZizqError> {
+        let url = self.url(&["reset"]);
+        let response = self.send(reqwest::Method::POST, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
+            .await
+    }
+
+    /// Alias for [`Client::reset`].
+    pub async fn erase_all_data(&self) -> Result<(), ZizqError> {
+        self.reset().await
     }
 
     /// Begin a bulk `PATCH /jobs`. Returns a [`PatchJobsBuilder`]

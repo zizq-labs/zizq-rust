@@ -2,9 +2,16 @@
 # Security advisories + Dependabot alerts are configured separately
 # in Settings → Code security and analysis.
 #
-# Strategy: weekly grouped patch+minor PRs per ecosystem so noise stays
-# low. Major version bumps come through as individual PRs since they
-# typically deserve a closer look (changelog read, MSRV check, etc.).
+# Strategy: weekly grouped patch+minor PRs, `versioning-strategy:
+# lockfile-only` so Cargo.toml constraints don't get auto-bumped — only
+# Cargo.lock moves, keeping dev/CI on the latest resolved versions.
+# Public-facing `[dependencies]` stays stable for crate consumers.
+# Cargo's default `^X` semver already accepts future patch/minor
+# releases through the lockfile alone.
+#
+# Note: Dependabot doesn't support per-dependency-type versioning
+# strategy in a single cargo entry. Security advisories override this
+# and PR regardless via Dependabot security updates.
 version: 2
 updates:
   - package-ecosystem: "cargo"
@@ -15,6 +22,7 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "deps"
+    versioning-strategy: "lockfile-only"
     groups:
       cargo-patch-minor:
         update-types:

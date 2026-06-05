@@ -163,7 +163,7 @@ jobs:
           client/.github/scripts/find-server-build.sh "${version%%.*}" server
 
       - name: Download client artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: zizq-rust-package
           path: artifact
@@ -221,7 +221,7 @@ jobs:
         run: cargo publish --no-verify
 
       - name: Download package artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: zizq-rust-package
           path: artifacts

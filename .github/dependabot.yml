@@ -23,6 +23,18 @@ updates:
     commit-message:
       prefix: "deps"
     versioning-strategy: "lockfile-only"
+    # time 0.3.46+ raised its MSRV beyond 1.85. We don't use the
+    # vulnerable RFC 2822 parser path (advisory dismissed as not
+    # applicable, plus clippy.toml `disallowed-types` guard prevents
+    # introducing it). Stay on 0.3.45 until we choose to bump our
+    # MSRV — remove these ignores then.
+    ignore:
+      - dependency-name: "time"
+        versions: [">= 0.3.46"]
+      - dependency-name: "time-macros"
+        versions: [">= 0.2.26"]
+      - dependency-name: "time-core"
+        versions: [">= 0.1.8"]
     groups:
       cargo-patch-minor:
         update-types:

@@ -300,4 +300,70 @@ mod tests {
         assert!(query.contains("status=ready%2Cscheduled"));
         assert!(query.contains("queue=emails%2Cwebhooks"));
     }
+
+    #[test]
+    fn priority_exact_value_serializes() {
+        let c = client();
+        let url = ListJobsBuilder::new(&c).priority(50u16).build_url();
+        let query = url.query().unwrap();
+        assert!(query.contains("priority=50"), "query: {query}");
+    }
+
+    #[test]
+    fn priority_inclusive_range_serializes() {
+        let c = client();
+        let url = ListJobsBuilder::new(&c).priority(0u16..=100).build_url();
+        let query = url.query().unwrap();
+        assert!(query.contains("priority=0..100"), "query: {query}");
+    }
+
+    #[test]
+    fn priority_open_upper_range_serializes() {
+        let c = client();
+        let url = ListJobsBuilder::new(&c).priority(50u16..).build_url();
+        let query = url.query().unwrap();
+        // `..` is percent-encoded as `..` by form_urlencoded (no escaping
+        // since the dots aren't reserved).
+        assert!(query.contains("priority=50.."), "query: {query}");
+    }
+
+    #[test]
+    fn priority_open_lower_range_serializes() {
+        let c = client();
+        let url = ListJobsBuilder::new(&c).priority(..=100u16).build_url();
+        let query = url.query().unwrap();
+        assert!(query.contains("priority=..100"), "query: {query}");
+    }
+
+    #[test]
+    fn priority_unbounded_range_serializes() {
+        let c = client();
+        let url = ListJobsBuilder::new(&c).priority::<_>(..).build_url();
+        let query = url.query().unwrap();
+        assert!(query.contains("priority=.."), "query: {query}");
+    }
+
+    #[test]
+    fn attempts_range_serializes() {
+        let c = client();
+        let url = ListJobsBuilder::new(&c).attempts(1u32..).build_url();
+        let query = url.query().unwrap();
+        assert!(query.contains("attempts=1.."), "query: {query}");
+    }
+
+    #[test]
+    fn ready_at_range_converts_to_milliseconds() {
+        use time::OffsetDateTime;
+
+        let c = client();
+        // 1_700_000_000 seconds → 1_700_000_000_000 ms
+        let lo = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let hi = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let url = ListJobsBuilder::new(&c).ready_at(lo..=hi).build_url();
+        let query = url.query().unwrap();
+        assert!(
+            query.contains("ready_at=1700000000000..1800000000000"),
+            "query: {query}",
+        );
+    }
 }

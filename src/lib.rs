@@ -125,6 +125,7 @@ mod jq_expr;
 mod list_errors;
 mod list_jobs;
 mod patch_jobs;
+mod range_filter;
 mod resources;
 mod router;
 mod take;
@@ -147,6 +148,7 @@ pub use jq_expr::{jq_array_prefix_eq, jq_contains, jq_eq};
 pub use list_errors::ListErrorsBuilder;
 pub use list_jobs::ListJobsBuilder;
 pub use patch_jobs::PatchJobsBuilder;
+pub use range_filter::RangeFilter;
 pub use resources::{
     BackoffConfig, ErrorPage, ErrorRecord, Job, JobPage, JobStatus, Order, PageLinks,
     RetentionConfig,

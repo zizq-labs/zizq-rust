@@ -29,9 +29,12 @@
 //!   filter" — which would match *everything* and is a genuine
 //!   footgun on bulk delete / patch.
 
+use time::OffsetDateTime;
 use url::form_urlencoded;
 
+use crate::range_filter::RangeFilter;
 use crate::resources::JobStatus;
+use crate::timestamp::to_ms_epoch;
 
 /// Job-selection filter params shared across listing-style endpoints.
 /// Internal — embedded privately in each endpoint builder.
@@ -42,6 +45,9 @@ pub(crate) struct JobFilter {
     pub(crate) job_type: Option<Vec<String>>,
     pub(crate) id: Option<Vec<String>>,
     pub(crate) jq: Option<String>,
+    pub(crate) priority: Option<RangeFilter<u16>>,
+    pub(crate) ready_at: Option<RangeFilter<OffsetDateTime>>,
+    pub(crate) attempts: Option<RangeFilter<u32>>,
 }
 
 /// True when `opt` is `Some` and the contained list is empty.
@@ -78,6 +84,9 @@ impl JobFilter {
             || is_present(&self.job_type)
             || is_present(&self.id)
             || self.jq.is_some()
+            || self.priority.is_some()
+            || self.ready_at.is_some()
+            || self.attempts.is_some()
     }
 
     /// Append the set filter params to a query-string serializer.
@@ -107,6 +116,18 @@ impl JobFilter {
         }
         if let Some(jq) = &self.jq {
             q.append_pair("filter", jq);
+        }
+        if let Some(priority) = &self.priority {
+            q.append_pair("priority", &priority.encode(|v| v.to_string()));
+        }
+        if let Some(ready_at) = &self.ready_at {
+            q.append_pair(
+                "ready_at",
+                &ready_at.encode(|t| to_ms_epoch(*t).to_string()),
+            );
+        }
+        if let Some(attempts) = &self.attempts {
+            q.append_pair("attempts", &attempts.encode(|v| v.to_string()));
         }
     }
 }
@@ -174,6 +195,43 @@ macro_rules! job_filter_setters {
         /// payload for filtering (e.g. `".user_id == 42"`).
         pub fn filter(mut self, expr: impl Into<String>) -> Self {
             self.filters.jq = Some(expr.into());
+            self
+        }
+
+        /// Filter by priority. Accepts an exact value or an inclusive
+        /// Rust range: `50`, `0..=100`, `100..`, `..=100`, or `..`.
+        /// Lower numbers are higher priority. The exclusive form
+        /// `0..100` is intentionally not accepted — the server only
+        /// supports inclusive bounds.
+        pub fn priority<R>(mut self, range: R) -> Self
+        where
+            R: Into<$crate::RangeFilter<u16>>,
+        {
+            self.filters.priority = Some(range.into());
+            self
+        }
+
+        /// Filter by `ready_at` timestamp. Accepts an exact
+        /// [`time::OffsetDateTime`] or an inclusive Rust range over
+        /// `OffsetDateTime`s. Bounds are converted to milliseconds
+        /// since the Unix epoch on the wire.
+        pub fn ready_at<R>(mut self, range: R) -> Self
+        where
+            R: Into<$crate::RangeFilter<::time::OffsetDateTime>>,
+        {
+            self.filters.ready_at = Some(range.into());
+            self
+        }
+
+        /// Filter by the job's failure count. Accepts an exact value
+        /// or an inclusive Rust range — `0` selects jobs that have
+        /// never failed, `1..` selects anything that has failed at
+        /// least once.
+        pub fn attempts<R>(mut self, range: R) -> Self
+        where
+            R: Into<$crate::RangeFilter<u32>>,
+        {
+            self.filters.attempts = Some(range.into());
             self
         }
     };

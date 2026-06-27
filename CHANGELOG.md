@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- **Three new range filters** on `ListJobsBuilder`, `CountJobsBuilder`,
+  `DeleteJobsBuilder`, and `PatchJobsBuilder`: `priority`, `ready_at`,
+  and `attempts`. Each setter accepts an exact value or one of the
+  inclusive Rust range syntaxes:
+
+      client.list_jobs()
+          .priority(50u16)              // exact match
+          .ready_at(now..=tomorrow)     // bounded
+          .attempts(1u32..)             // 1 or more
+          .await?;
+
+  The exclusive half-open form `a..b` is **deliberately not accepted** —
+  there is no `From<Range<T>>` impl for `RangeFilter<T>`, so the
+  compiler rejects it at the call site. The server only supports
+  inclusive bounds, and accepting `a..b` would silently shift the
+  upper bound by one. Use `a..=b - 1` explicitly if that is what you
+  meant.
+
+- **`RangeFilter<T>`** — new public enum in the prelude. Most callers
+  never name it directly because each setter takes
+  `impl Into<RangeFilter<T>>`, but it is exported for users who want
+  to construct one programmatically or store one in a struct field.
+  `From` impls cover bare values (`u16`, `u32`, `u64`,
+  `time::OffsetDateTime`) and the inclusive range types
+  (`RangeInclusive`, `RangeFrom`, `RangeToInclusive`, `RangeFull`).
+
+- `ready_at` bounds accept `time::OffsetDateTime` — consistent with
+  `EnqueueBuilder::ready_at`. The client converts each bound to
+  milliseconds since the Unix epoch on the wire.
+
+### Requires
+
+- Zizq server **0.5.0** or later. Older servers will reject requests
+  that include any of the new query parameters with `400 Bad Request`.
+
 ## 0.4.0
 
 ### Added

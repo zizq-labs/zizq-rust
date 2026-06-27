@@ -39,9 +39,10 @@ for job in &page.jobs {
 # Ok(()) }
 ```
 
-Filters (`status`, `queue`, `job_type`, `id`, and a `filter` jq expression)
-combine with AND. The same filter set is shared by `count_jobs`,
-`delete_all_jobs`, and `patch_all_jobs`.
+Filters (`status`, `queue`, `job_type`, `id`, a `filter` jq expression, and
+the `priority` / `ready_at` / `attempts` range filters described
+[below](#filtering-by-range)) combine with AND. The same filter set is
+shared by `count_jobs`, `delete_all_jobs`, and `patch_all_jobs`.
 
 ### Streaming every match
 
@@ -96,6 +97,75 @@ let _ = client
 
 `jq_eq`, `jq_contains`, and `jq_array_prefix_eq` each return a `String` you
 pass straight to `.filter(...)`.
+
+## Filtering by range
+
+The `priority`, `ready_at`, and `attempts` setters all share a calling
+convention: pass an exact value (`50`, `OffsetDateTime`, …) for an exact
+match, or one of the **inclusive** Rust range syntaxes for a range:
+
+| Argument | Meaning                          |
+| -------- | -------------------------------- |
+| `n`      | Exactly `n`.                     |
+| `a..=b`  | Between `a` and `b`, inclusive.  |
+| `a..`    | At least `a`.                    |
+| `..=b`   | At most `b`.                     |
+| `..`     | Unbounded — every value matches. |
+
+The half-open `a..b` form is **deliberately not accepted** — the server
+only supports inclusive bounds, and `0..100` would silently shift the upper
+bound by one. There is no `From<Range<T>>` impl for `RangeFilter<T>`, so
+the compiler rejects it at the call site. Write `0..=99` if that is what
+you meant.
+
+```rust
+# use zizq::{Client, JobStatus};
+# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+// Jobs that have failed at least once.
+let flaky = client
+    .list_jobs()
+    .attempts(1u32..)
+    .await?;
+
+// High-priority jobs across a single queue.
+let urgent = client
+    .count_jobs()
+    .queue(["emails"])
+    .priority(..=100u16)
+    .await?;
+# let _ = (flaky, urgent);
+# Ok(()) }
+```
+
+`ready_at` accepts `time::OffsetDateTime` bounds — the same type as
+`EnqueueBuilder::ready_at`. The client converts each bound to milliseconds
+since the Unix epoch on the wire:
+
+```rust
+# use zizq::{Client, JobStatus};
+# use time::{Duration, OffsetDateTime};
+# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+let now = OffsetDateTime::now_utc();
+
+// Scheduled jobs that are eligible to run by now.
+let due = client
+    .count_jobs()
+    .status([JobStatus::Scheduled])
+    .ready_at(..=now)
+    .await?;
+
+// Anything ready within the next 24 hours.
+let upcoming = client
+    .count_jobs()
+    .ready_at(now..=(now + Duration::hours(24)))
+    .await?;
+# let _ = (due, upcoming);
+# Ok(()) }
+```
+
+Each range filter applies independently to its own field, and composes with
+the existing `status` / `queue` / `job_type` / `id` / `filter` filters via
+AND.
 
 ## Updating jobs
 

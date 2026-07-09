@@ -44,43 +44,45 @@ time on both the producer and consumer side.
 
 A minimal producer and consumer look like this:
 
-```rust
-use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
-use zizq::{Client, JobKind, Router, Worker};
-
-#[derive(Serialize, Deserialize)]
-struct SendEmail {
-    to: String,
-}
-
-impl JobKind for SendEmail {
-    const NAME: &'static str = "send_email";
-    const QUEUE: &'static str = "emails";
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::builder().url("http://127.0.0.1:7890").build()?;
-
-    // Producer — enqueue a job.
-    client
-        .enqueue(SendEmail { to: "alice@example.com".into() })
-        .await?;
-
-    // Consumer — run a worker until Ctrl-C.
-    let worker = Worker::builder()
-        .client(client)
-        .concurrency(16)
-        .handler(Router::new().route(async |job: SendEmail| {
-            println!("emailing {}", job.to);
-            Ok::<(), Infallible>(())
-        }))
-        .build()?;
-
-    worker.run(tokio::signal::ctrl_c()).await?;
-    Ok(())
-}
-```
+> Rust:
+>
+> ```rust
+> use serde::{Deserialize, Serialize};
+> use std::convert::Infallible;
+> use zizq::{Client, JobKind, Router, Worker};
+> 
+> #[derive(Serialize, Deserialize)]
+> struct SendEmail {
+>     to: String,
+> }
+> 
+> impl JobKind for SendEmail {
+>     const NAME: &'static str = "send_email";
+>     const QUEUE: &'static str = "emails";
+> }
+> 
+> #[tokio::main]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     let client = Client::builder().url("http://127.0.0.1:7890").build()?;
+> 
+>     // Producer — enqueue a job.
+>     client
+>         .enqueue(SendEmail { to: "alice@example.com".into() })
+>         .await?;
+> 
+>     // Consumer — run a worker until Ctrl-C.
+>     let worker = Worker::builder()
+>         .client(client)
+>         .concurrency(16)
+>         .handler(Router::new().route(async |job: SendEmail| {
+>             println!("emailing {}", job.to);
+>             Ok::<(), Infallible>(())
+>         }))
+>         .build()?;
+> 
+>     worker.run(tokio::signal::ctrl_c()).await?;
+>     Ok(())
+> }
+> ```
 
 The rest of this guide works through each piece in turn.

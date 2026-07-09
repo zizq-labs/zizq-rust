@@ -7,9 +7,11 @@
 The official Zizq Rust client is the [`zizq`](https://crates.io/crates/zizq)
 crate. Add it with Cargo:
 
-```shell
-$ cargo add zizq
-```
+> Command:
+>
+> ```bash
+> $ cargo add zizq
+> ```
 
 The client's minimum supported Rust version (MSRV) is **1.85**.
 
@@ -22,10 +24,12 @@ TLS support is behind a feature flag — enable exactly one:
 
 To use the native backend instead of the default:
 
-```toml
-[dependencies]
-zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
-```
+> Cargo.toml:
+>
+> ```toml
+> [dependencies]
+> zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
+> ```
 
 ## Versioning
 
@@ -57,17 +61,19 @@ There is no global configuration object.
 > The best-practice approach is to read these values from environment
 > variables. Examples here are hard-coded for clarity.
 
-```rust
-use std::time::Duration;
-use zizq::{Client, Format};
-
-let client = Client::builder()
-    .url("https://host.your.network:7890")
-    .format(Format::Json)
-    .connect_timeout(Duration::from_secs(5))
-    .build()?;
-# Ok::<(), zizq::ZizqError>(())
-```
+> Rust:
+>
+> ```rust
+> use std::time::Duration;
+> use zizq::{Client, Format};
+> 
+> let client = Client::builder()
+>     .url("https://host.your.network:7890")
+>     .format(Format::Json)
+>     .connect_timeout(Duration::from_secs(5))
+>     .build()?;
+> # Ok::<(), zizq::ZizqError>(())
+> ```
 
 The `Client` is internally `Arc`-backed, so cloning is cheap — clone it freely
 to share across tasks.
@@ -127,19 +133,21 @@ to share across tasks.
 For an `https://` server, supply a custom CA if its certificate is privately
 signed, and a client identity if the server requires mutual TLS:
 
-```rust
-use zizq::Client;
-
-let client = Client::builder()
-    .url("https://host.your.network:7890")
-    .ca_certificate(std::fs::read("server-ca.pem")?)
-    .client_identity(
-        std::fs::read("client-cert.pem")?,
-        std::fs::read("client-key.pem")?,
-    )
-    .build()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
+> Rust:
+>
+> ```rust
+> use zizq::Client;
+> 
+> let client = Client::builder()
+>     .url("https://host.your.network:7890")
+>     .ca_certificate(std::fs::read("server-ca.pem")?)
+>     .client_identity(
+>         std::fs::read("client-cert.pem")?,
+>         std::fs::read("client-key.pem")?,
+>     )
+>     .build()?;
+> # Ok::<(), Box<dyn std::error::Error>>(())
+> ```
 
 > [!CAUTION]
 > If your server is exposed directly to the internet, it should require

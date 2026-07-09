@@ -4,20 +4,22 @@ Enqueue a job with `Client::enqueue`, passing a value of any type that
 implements [`JobKind`](./defining-jobs.md). It returns an `EnqueueBuilder`
 that you `.await` to send the request:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use zizq::{Client, JobKind};
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-let job = client
-    .enqueue(SendEmail { to: "alice@example.com".into() })
-    .await?;
-
-println!("enqueued {} on queue {}", job.id, job.queue);
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, JobKind};
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> let job = client
+>     .enqueue(SendEmail { to: "alice@example.com".into() })
+>     .await?;
+> 
+> println!("enqueued {} on queue {}", job.id, job.queue);
+> # Ok(()) }
+> ```
 
 Awaiting the builder returns the created `Job` — its server-assigned `id`,
 resolved `queue`, `priority`, and so on.
@@ -28,23 +30,25 @@ Before awaiting, chain methods to override the type's defaults for this one
 call. Anything not overridden falls back to the [`JobKind`](./defining-jobs.md)
 constant, then to the server default.
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use std::time::Duration;
-# use zizq::{Client, JobKind};
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-client
-    .enqueue(SendEmail { to: "alice@example.com".into() })
-    .queue("priority-emails")
-    .priority(10)
-    .delay(Duration::from_secs(3600))
-    .retry_limit(3)
-    .await?;
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use std::time::Duration;
+> # use zizq::{Client, JobKind};
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> client
+>     .enqueue(SendEmail { to: "alice@example.com".into() })
+>     .queue("priority-emails")
+>     .priority(10)
+>     .delay(Duration::from_secs(3600))
+>     .retry_limit(3)
+>     .await?;
+> # Ok(()) }
+> ```
 
 <table>
     <thead>
@@ -100,40 +104,44 @@ client
 To enqueue many jobs in a single request, use `Client::enqueue_bulk`. It
 returns a `BulkEnqueueBuilder` that collects per-job `EnqueueBuilder`s:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use zizq::{Client, JobKind};
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-let jobs = client
-    .enqueue_bulk()
-    .add(client.enqueue(SendEmail { to: "a@example.com".into() }))
-    .add(client.enqueue(SendEmail { to: "b@example.com".into() }).priority(10))
-    .await?;
-
-assert_eq!(jobs.len(), 2);
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, JobKind};
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> let jobs = client
+>     .enqueue_bulk()
+>     .add(client.enqueue(SendEmail { to: "a@example.com".into() }))
+>     .add(client.enqueue(SendEmail { to: "b@example.com".into() }).priority(10))
+>     .await?;
+> 
+> assert_eq!(jobs.len(), 2);
+> # Ok(()) }
+> ```
 
 `.add` is chainable and consuming. For building a batch in a loop, use the
 mutating `.push` instead:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use zizq::{Client, JobKind};
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-let mut batch = client.enqueue_bulk();
-for n in 0..1000 {
-    batch.push(client.enqueue(SendEmail { to: format!("user{n}@example.com") }));
-}
-let jobs = batch.await?;
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, JobKind};
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> let mut batch = client.enqueue_bulk();
+> for n in 0..1000 {
+>     batch.push(client.enqueue(SendEmail { to: format!("user{n}@example.com") }));
+> }
+> let jobs = batch.await?;
+> # Ok(()) }
+> ```
 
 Different `JobKind`s can be mixed freely within a single batch. Each batch is
 enqueued atomically on the server.

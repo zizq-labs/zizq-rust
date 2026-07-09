@@ -4,28 +4,30 @@ A `Worker` streams jobs from the server, dispatches each to a handler with
 bounded concurrency, batches acknowledgements, and reconnects on transient
 failures. Build one with `Worker::builder()`:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use std::convert::Infallible;
-# use zizq::{Client, JobKind, Router, Worker};
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
-let worker = Worker::builder()
-    .client(client)
-    .concurrency(25)
-    .queues(vec!["emails"])
-    .handler(Router::new().route(async |job: SendEmail| {
-        // your application logic here
-        println!("emailing {}", job.to);
-        Ok::<(), Infallible>(())
-    }))
-    .build()?;
-
-worker.run(tokio::signal::ctrl_c()).await?;  // runs until Ctrl-C
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use std::convert::Infallible;
+> # use zizq::{Client, JobKind, Router, Worker};
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
+> let worker = Worker::builder()
+>     .client(client)
+>     .concurrency(25)
+>     .queues(vec!["emails"])
+>     .handler(Router::new().route(async |job: SendEmail| {
+>         // your application logic here
+>         println!("emailing {}", job.to);
+>         Ok::<(), Infallible>(())
+>     }))
+>     .build()?;
+> 
+> worker.run(tokio::signal::ctrl_c()).await?;  // runs until Ctrl-C
+> # Ok(()) }
+> ```
 
 `worker.run(shutdown)` takes a *shutdown future* — when it resolves, the
 worker shuts down gracefully (see [below](#graceful-shutdown)). Pass
@@ -38,22 +40,24 @@ The `handler` passed to a `Worker` is anything that implements the
 `JobHandler` trait. The simplest handler is an async closure taking a `Job` —
 the raw job, with its `id`, `job_type`, and `payload` (as JSON):
 
-```rust
-use zizq::{Client, Job, Worker};
-# async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
-let worker = Worker::builder()
-    .client(client)
-    .concurrency(25)
-    .queues(vec!["emails"])
-    .handler(|job: Job| async move {
-        println!("processing {} ({})", job.id, job.job_type);
-        // ... your application logic ...
-        Ok::<(), std::convert::Infallible>(())
-    })
-    .build()?;
-# let _ = worker;
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> use zizq::{Client, Job, Worker};
+> # async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
+> let worker = Worker::builder()
+>     .client(client)
+>     .concurrency(25)
+>     .queues(vec!["emails"])
+>     .handler(|job: Job| async move {
+>         println!("processing {} ({})", job.id, job.job_type);
+>         // ... your application logic ...
+>         Ok::<(), std::convert::Infallible>(())
+>     })
+>     .build()?;
+> # let _ = worker;
+> # Ok(()) }
+> ```
 
 A handler that returns `Ok` acknowledges the job as complete; returning `Err`
 fails it, and the server applies the job's retry/backoff policy.
@@ -69,26 +73,28 @@ you would a closure. Rather than one function for every job, it dispatches
 each job to a handler chosen by its type, deserializing the payload into the
 right `JobKind` automatically. Register one handler per type with `.route`:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use std::convert::Infallible;
-# use zizq::Router;
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl zizq::JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# #[derive(Serialize, Deserialize)]
-# struct ProcessReport { id: u64 }
-# impl zizq::JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
-let router = Router::new()
-    .route(async |job: SendEmail| {
-        // ... send the email ...
-        Ok::<(), Infallible>(())
-    })
-    .route(async |job: ProcessReport| {
-        // ... process the report ...
-        Ok::<(), Infallible>(())
-    });
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use std::convert::Infallible;
+> # use zizq::Router;
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl zizq::JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # #[derive(Serialize, Deserialize)]
+> # struct ProcessReport { id: u64 }
+> # impl zizq::JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
+> let router = Router::new()
+>     .route(async |job: SendEmail| {
+>         // ... send the email ...
+>         Ok::<(), Infallible>(())
+>     })
+>     .route(async |job: ProcessReport| {
+>         // ... process the report ...
+>         Ok::<(), Infallible>(())
+>     });
+> ```
 
 A job whose type matches no route is failed with a routing error.
 
@@ -99,34 +105,36 @@ config), build the router with `Router::with_state(...)`. Each handler that
 needs the state takes a `State<S>` extractor as its first argument. The state
 is cloned per invocation — wrap heavy state in `Arc<...>` so clones are cheap.
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use std::convert::Infallible;
-# use std::sync::Arc;
-# use zizq::{JobKind, Router, State};
-# #[derive(Serialize, Deserialize)]
-# struct SendEmail { to: String }
-# impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-# #[derive(Serialize, Deserialize)]
-# struct ProcessReport { id: u64 }
-# impl JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
-#[derive(Clone)]
-struct AppState {
-    // pretend these are a database pool, mailer, etc.
-    db: Arc<()>,
-    mailer: Arc<()>,
-}
-
-let router = Router::with_state(AppState { db: Arc::new(()), mailer: Arc::new(()) })
-    .route(async |State(ctx): State<AppState>, job: SendEmail| {
-        let _ = (ctx.mailer, job.to);
-        Ok::<(), Infallible>(())
-    })
-    .route(async |State(ctx): State<AppState>, job: ProcessReport| {
-        let _ = (ctx.db, job.id);
-        Ok::<(), Infallible>(())
-    });
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use std::convert::Infallible;
+> # use std::sync::Arc;
+> # use zizq::{JobKind, Router, State};
+> # #[derive(Serialize, Deserialize)]
+> # struct SendEmail { to: String }
+> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
+> # #[derive(Serialize, Deserialize)]
+> # struct ProcessReport { id: u64 }
+> # impl JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
+> #[derive(Clone)]
+> struct AppState {
+>     // pretend these are a database pool, mailer, etc.
+>     db: Arc<()>,
+>     mailer: Arc<()>,
+> }
+> 
+> let router = Router::with_state(AppState { db: Arc::new(()), mailer: Arc::new(()) })
+>     .route(async |State(ctx): State<AppState>, job: SendEmail| {
+>         let _ = (ctx.mailer, job.to);
+>         Ok::<(), Infallible>(())
+>     })
+>     .route(async |State(ctx): State<AppState>, job: ProcessReport| {
+>         let _ = (ctx.db, job.id);
+>         Ok::<(), Infallible>(())
+>     });
+> ```
 
 Stateless handlers (`Fn(T)`) are also accepted on a stateful router — they
 just ignore the state, so an additional route that needs no resources can be
@@ -140,12 +148,14 @@ roadmap.
 `concurrency` sets how many job handlers may run at once. The default is `1`
 — a purely sequential worker.
 
-```rust
-# use zizq::Worker;
-# fn x(b: zizq::WorkerBuilder) -> zizq::WorkerBuilder {
-b.concurrency(100)
-# }
-```
+> Rust:
+>
+> ```rust
+> # use zizq::Worker;
+> # fn x(b: zizq::WorkerBuilder) -> zizq::WorkerBuilder {
+> b.concurrency(100)
+> # }
+> ```
 
 ### Prefetch
 
@@ -153,12 +163,14 @@ By default the worker fetches as many jobs as its concurrency. Throughput can
 improve by *prefetching* more — keeping a buffer of jobs ready so a handler
 never waits on the network for its next job.
 
-```rust
-# use zizq::Worker;
-# fn x(b: zizq::WorkerBuilder) -> zizq::WorkerBuilder {
-b.concurrency(50).prefetch(60)  // 50 in flight, 10 buffered
-# }
-```
+> Rust:
+>
+> ```rust
+> # use zizq::Worker;
+> # fn x(b: zizq::WorkerBuilder) -> zizq::WorkerBuilder {
+> b.concurrency(50).prefetch(60)  // 50 in flight, 10 buffered
+> # }
+> ```
 
 > [!WARNING]
 > Do not set `prefetch` below `concurrency` — that starves the worker, since
@@ -170,12 +182,14 @@ b.concurrency(50).prefetch(60)  // 50 in flight, 10 buffered
 default) means *all queues*. Queues need not be created — they exist
 implicitly once jobs are enqueued to them.
 
-```rust
-# use zizq::Worker;
-# fn x(b: zizq::WorkerBuilder) -> zizq::WorkerBuilder {
-b.queues(vec!["emails", "invoicing"])
-# }
-```
+> Rust:
+>
+> ```rust
+> # use zizq::Worker;
+> # fn x(b: zizq::WorkerBuilder) -> zizq::WorkerBuilder {
+> b.queues(vec!["emails", "invoicing"])
+> # }
+> ```
 
 ## Graceful shutdown
 
@@ -200,15 +214,17 @@ are available for full manual control:
 - `Client::report_failure` fails a job, with optional retry timing and error
   detail.
 
-```rust
-use futures_util::TryStreamExt;
-# use zizq::Client;
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-let mut stream = client.take().queues(["emails"]).prefetch(16).await?;
-
-while let Some(job) = stream.try_next().await? {
-    // ... process the job ...
-    client.report_success(&job.id).await?;
-}
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> use futures_util::TryStreamExt;
+> # use zizq::Client;
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> let mut stream = client.take().queues(["emails"]).prefetch(16).await?;
+> 
+> while let Some(job) = stream.try_next().await? {
+>     // ... process the job ...
+>     client.report_success(&job.id).await?;
+> }
+> # Ok(()) }
+> ```

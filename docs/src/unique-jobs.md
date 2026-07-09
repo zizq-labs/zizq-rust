@@ -22,13 +22,15 @@ same without the tag.
 Pass whatever identifies the job: the whole payload (`self`), a single field
 (`&self.field`), or a tuple of fields for a subset:
 
-```rust
-# use zizq::UniqueKey;
-// Whole payload.
-# let _ =
-UniqueKey::tagged_hash_of("send_email", ("alice@example.com", "Welcome!"))
-# ;
-```
+> Rust:
+>
+> ```rust
+> # use zizq::UniqueKey;
+> // Whole payload.
+> # let _ =
+> UniqueKey::tagged_hash_of("send_email", ("alice@example.com", "Welcome!"))
+> # ;
+> ```
 
 > [!NOTE]
 > A tuple of fields serialises to a JSON array, so the order of its elements
@@ -44,41 +46,45 @@ There are two ways to attach a key to a job.
 **Per job type** — override `JobKind::unique_key` to derive a key from the
 payload. Every enqueue of that type then carries it automatically:
 
-```rust
-# use serde::{Deserialize, Serialize};
-use zizq::{JobKind, UniqueKey};
-
-# #[derive(Serialize, Deserialize)]
-struct SendWelcomeEmail {
-    user_id: u64,
-}
-
-impl JobKind for SendWelcomeEmail {
-    const NAME: &'static str = "send_welcome_email";
-
-    fn unique_key(&self) -> Option<UniqueKey> {
-        Some(UniqueKey::tagged_hash_of(Self::NAME, &self.user_id))
-    }
-}
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> use zizq::{JobKind, UniqueKey};
+> 
+> # #[derive(Serialize, Deserialize)]
+> struct SendWelcomeEmail {
+>     user_id: u64,
+> }
+> 
+> impl JobKind for SendWelcomeEmail {
+>     const NAME: &'static str = "send_welcome_email";
+> 
+>     fn unique_key(&self) -> Option<UniqueKey> {
+>         Some(UniqueKey::tagged_hash_of(Self::NAME, &self.user_id))
+>     }
+> }
+> ```
 
 **Per enqueue** — supply a key for a single call with
 `EnqueueBuilder::unique_key`. This overrides whatever the `JobKind` would
 derive:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use zizq::{Client, JobKind, UniqueKey};
-# #[derive(Serialize, Deserialize)]
-# struct RebuildIndex;
-# impl JobKind for RebuildIndex { const NAME: &'static str = "rebuild_index"; }
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-client
-    .enqueue(RebuildIndex)
-    .unique_key(UniqueKey::raw("rebuild_index"))
-    .await?;
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, JobKind, UniqueKey};
+> # #[derive(Serialize, Deserialize)]
+> # struct RebuildIndex;
+> # impl JobKind for RebuildIndex { const NAME: &'static str = "rebuild_index"; }
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> client
+>     .enqueue(RebuildIndex)
+>     .unique_key(UniqueKey::raw("rebuild_index"))
+>     .await?;
+> # Ok(()) }
+> ```
 
 ## Scope
 
@@ -111,11 +117,13 @@ duplicates. Set it with `UniqueScope`:
 `UniqueKey::raw(key)` uses the default `Queued` scope. To choose a different
 scope, chain `.scope(...)`:
 
-```rust
-use zizq::{UniqueKey, UniqueScope};
-
-let key = UniqueKey::raw("rebuild_index").scope(UniqueScope::Active);
-```
+> Rust:
+>
+> ```rust
+> use zizq::{UniqueKey, UniqueScope};
+> 
+> let key = UniqueKey::raw("rebuild_index").scope(UniqueScope::Active);
+> ```
 
 ## Detecting a duplicate
 
@@ -123,20 +131,22 @@ When an enqueue collides with an existing unique job, the call still succeeds �
 it returns the *existing* job, with its `duplicate` field set to
 `Some(true)`:
 
-```rust
-# use serde::{Deserialize, Serialize};
-# use zizq::{Client, JobKind, UniqueKey};
-# #[derive(Serialize, Deserialize)]
-# struct RebuildIndex;
-# impl JobKind for RebuildIndex { const NAME: &'static str = "rebuild_index"; }
-# async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-let job = client
-    .enqueue(RebuildIndex)
-    .unique_key(UniqueKey::raw("rebuild_index"))
-    .await?;
-
-if job.duplicate == Some(true) {
-    println!("a rebuild was already queued — job {}", job.id);
-}
-# Ok(()) }
-```
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, JobKind, UniqueKey};
+> # #[derive(Serialize, Deserialize)]
+> # struct RebuildIndex;
+> # impl JobKind for RebuildIndex { const NAME: &'static str = "rebuild_index"; }
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> let job = client
+>     .enqueue(RebuildIndex)
+>     .unique_key(UniqueKey::raw("rebuild_index"))
+>     .await?;
+> 
+> if job.duplicate == Some(true) {
+>     println!("a rebuild was already queued — job {}", job.id);
+> }
+> # Ok(()) }
+> ```

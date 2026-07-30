@@ -1,0 +1,45 @@
+[package]
+name = "zizq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Official Rust Client for the Zizq Job Queue"
+readme = "README.md"
+documentation = "https://zizq.io/docs/clients/rust/"
+keywords = ["job-queue", "message-queue", "background-worker", "cron", "scheduler"]
+categories = ["asynchronous", "api-bindings"]
+exclude = ["examples/"]
+
+[features]
+default = ["rustls-tls"]
+# TLS backends — enable exactly one. `rustls-tls` (default) is pure
+# Rust with no system OpenSSL dependency; `native-tls` uses the
+# platform TLS library.
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["http2", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rmp-serde = "1"
+erased-serde = "0.4"
+thiserror = "2"
+url = "2"
+time = { version = "0.3", features = ["serde", "macros"] }
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
+log = "0.4"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
+http-body-util = "0.1"
+futures-util = "0.3"

@@ -17,8 +17,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Read version from Cargo's source of truth.
-VERSION="$(cargo pkgid | sed 's/.*[#@]//')"
+# Read version from Cargo's source of truth. `-p zizq` is required in
+# a workspace with multiple potential members.
+VERSION="$(cargo pkgid -p zizq | sed 's/.*[#@]//')"
 CRATE="zizq-${VERSION}.crate"
 OUT_DIR="target/release"
 
@@ -42,7 +43,7 @@ fi
 # iterating with uncommitted changes. CI runs from a clean checkout so
 # no flag is needed there.
 echo "    Packaging..."
-cargo package "$@"
+cargo package -p zizq "$@"
 
 # Mirror the convention in our other clients by surfacing the artifact under
 # target/release/ alongside its checksum.

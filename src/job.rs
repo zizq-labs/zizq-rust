@@ -7,6 +7,7 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::batch::BatchConfig;
 use crate::resources::{BackoffConfig, RetentionConfig};
 use crate::unique_key::UniqueKey;
 
@@ -98,6 +99,23 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + 'static {
     /// [`UniqueScope`]: crate::UniqueScope
     /// [`EnqueueBuilder::unique_key`]: crate::EnqueueBuilder::unique_key
     fn unique_key(&self) -> Option<UniqueKey> {
+        None
+    }
+
+    /// Derive a batched-job configuration from this payload.
+    ///
+    /// Requires a [Pro license](https://zizq.io/pricing) on the server.
+    ///
+    /// Override this to opt every enqueue of this type into server-side
+    /// folding; the server groups pending enqueues by
+    /// [`BatchConfig::key`] and evaluates [`BatchConfig::when`] and
+    /// [`BatchConfig::fold`] to merge each incoming payload into the
+    /// existing batch. Returning `None` (the default) means no default
+    /// batching — a config can still be supplied per-call via
+    /// [`EnqueueBuilder::batch`].
+    ///
+    /// [`EnqueueBuilder::batch`]: crate::EnqueueBuilder::batch
+    fn batch(&self) -> Option<BatchConfig> {
         None
     }
 }

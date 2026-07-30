@@ -1522,6 +1522,10 @@ pub(crate) struct EnqueueRequest {
     /// Optional scope for the unique key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unique_while: Option<UniqueScope>,
+
+    /// Optional batched-job configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch: Option<crate::batch::BatchConfig>,
 }
 
 /// Raw API format body for reporting a job failure.

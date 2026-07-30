@@ -109,6 +109,7 @@
 //! # Ok(()) }
 //! ```
 
+mod batch;
 mod bulk_enqueue;
 mod client;
 mod count_jobs;
@@ -133,6 +134,7 @@ mod timestamp;
 mod unique_key;
 mod worker;
 
+pub use batch::BatchConfig;
 pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};
 pub use count_jobs::CountJobsBuilder;

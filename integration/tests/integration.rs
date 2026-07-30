@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Notify;
 use zizq::{
-    jq_contains, jq_eq, Client, CronEntry, JobKind, JobPatch, Router, Worker, ZizqError,
+    jq_contains, jq_eq, BatchConfig, Client, CronEntry, JobKind, JobPatch, Router, UniqueKey,
+    Worker, ZizqError,
 };
 
 /// A job kind carrying an arbitrary JSON payload. The macro stamps
@@ -41,6 +42,9 @@ macro_rules! job_kind {
 job_kind!(Alpha, "alpha");
 job_kind!(Beta, "beta");
 job_kind!(Gamma, "gamma");
+job_kind!(AuditEvents, "audit.events");
+job_kind!(Push, "push");
+job_kind!(BatchedWorker, "batched_worker");
 
 /// Connect to the server named by `ZIZQ_URL` and wipe every job and
 /// cron group, so each scenario starts from a known-empty state.
@@ -470,4 +474,289 @@ async fn delete_all_crons_wipes_every_group() {
 
     let remaining = client.list_crons().await.expect("list_crons");
     assert!(remaining.is_empty(), "expected no cron groups after wipe");
+}
+
+// --- Batched jobs (Pro) ---
+//
+// Every batched enqueue is gated behind a Pro license on the server —
+// on a free-tier server the enqueue returns 403, in which case we skip
+// the rest of the scenario (mirroring the Node/Ruby suites).
+
+#[tokio::test]
+async fn batched_second_enqueue_folds_into_first_and_merges_payload() {
+    let client = fresh().await;
+
+    let r1 = match client
+        .enqueue(AuditEvents(json!([{ "id": 1 }])))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".", 100).keyed_by("audit"))
+        .await
+    {
+        Ok(job) => job,
+        Err(ZizqError::Response { status: 403, .. }) => return,
+        Err(e) => panic!("first enqueue failed: {e:?}"),
+    };
+
+    let r2 = client
+        .enqueue(AuditEvents(json!([{ "id": 2 }, { "id": 3 }])))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".", 100).keyed_by("audit"))
+        .await
+        .expect("second enqueue");
+
+    assert_eq!(r1.folded, Some(false));
+    assert_eq!(r2.folded, Some(true));
+    assert_eq!(r2.id, r1.id, "fold reuses the batch's job id");
+
+    let fetched = client.get_job(&r1.id).await.expect("get_job");
+    assert_eq!(
+        fetched.payload,
+        Some(json!([{ "id": 1 }, { "id": 2 }, { "id": 3 }])),
+    );
+    assert!(
+        fetched.batch.is_some(),
+        "batch config is visible on job reads",
+    );
+}
+
+#[tokio::test]
+async fn batched_different_batch_keys_do_not_fold() {
+    let client = fresh().await;
+
+    let r1 = match client
+        .enqueue(Push(json!({ "deviceIds": ["a"], "platform": "apple" })))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".deviceIds", 100).keyed_by("push:apple"))
+        .await
+    {
+        Ok(job) => job,
+        Err(ZizqError::Response { status: 403, .. }) => return,
+        Err(e) => panic!("first enqueue failed: {e:?}"),
+    };
+
+    let r2 = client
+        .enqueue(Push(json!({ "deviceIds": ["b"], "platform": "android" })))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".deviceIds", 100).keyed_by("push:android"))
+        .await
+        .expect("second enqueue");
+
+    assert_eq!(r1.folded, Some(false));
+    assert_eq!(r2.folded, Some(false));
+    assert_ne!(r1.id, r2.id);
+}
+
+#[tokio::test]
+async fn batched_bulk_intra_fold_within_one_call() {
+    let client = fresh().await;
+
+    let bulk = client
+        .enqueue_bulk()
+        .add(
+            client
+                .enqueue(AuditEvents(json!([{ "id": 1 }])))
+                .queue("batched-integration")
+                .batch(BatchConfig::at(".", 100).keyed_by("audit")),
+        )
+        .add(
+            client
+                .enqueue(AuditEvents(json!([{ "id": 2 }])))
+                .queue("batched-integration")
+                .batch(BatchConfig::at(".", 100).keyed_by("audit")),
+        )
+        .add(
+            client
+                .enqueue(AuditEvents(json!([{ "id": 3 }])))
+                .queue("batched-integration")
+                .batch(BatchConfig::at(".", 100).keyed_by("audit")),
+        )
+        .await;
+
+    let results = match bulk {
+        Ok(jobs) => jobs,
+        Err(ZizqError::Response { status: 403, .. }) => return,
+        Err(e) => panic!("bulk enqueue failed: {e:?}"),
+    };
+
+    assert_eq!(results[0].folded, Some(false));
+    assert_eq!(results[1].folded, Some(true));
+    assert_eq!(results[2].folded, Some(true));
+    assert_eq!(results[1].id, results[0].id);
+    assert_eq!(results[2].id, results[0].id);
+
+    let fetched = client.get_job(&results[0].id).await.expect("get_job");
+    assert_eq!(
+        fetched.payload,
+        Some(json!([{ "id": 1 }, { "id": 2 }, { "id": 3 }])),
+    );
+}
+
+#[tokio::test]
+async fn batched_dedup_collapses_overlapping_items() {
+    let client = fresh().await;
+
+    let first = client
+        .enqueue(AuditEvents(json!([{ "id": 1 }, { "id": 2 }])))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".", 100).dedup().keyed_by("audit"))
+        .await;
+
+    if let Err(ZizqError::Response { status: 403, .. }) = first {
+        return;
+    }
+    first.expect("first enqueue");
+
+    let r = client
+        .enqueue(AuditEvents(json!([{ "id": 2 }, { "id": 3 }])))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".", 100).dedup().keyed_by("audit"))
+        .await
+        .expect("second enqueue");
+    assert_eq!(r.folded, Some(true));
+
+    let fetched = client.get_job(&r.id).await.expect("get_job");
+    // `unique` in jq sorts as a side effect; assert on the sorted id set.
+    let mut ids: Vec<i64> = fetched
+        .payload
+        .expect("payload")
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|v| v["id"].as_i64().expect("id"))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3]);
+}
+
+#[tokio::test]
+async fn batched_worker_receives_the_merged_payload() {
+    let client = fresh().await;
+
+    let first = client
+        .enqueue(BatchedWorker(json!([{ "id": 1 }])))
+        .queue("batched-worker-integration")
+        .batch(BatchConfig::at(".", 100).keyed_by("batched-worker"))
+        .await;
+
+    if let Err(ZizqError::Response { status: 403, .. }) = first {
+        return;
+    }
+    first.expect("first enqueue");
+
+    for id in [2, 3] {
+        client
+            .enqueue(BatchedWorker(json!([{ "id": id }])))
+            .queue("batched-worker-integration")
+            .batch(BatchConfig::at(".", 100).keyed_by("batched-worker"))
+            .await
+            .expect("subsequent enqueue");
+    }
+
+    let received: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let shutdown = Arc::new(Notify::new());
+
+    let worker = Worker::builder()
+        .client(client.clone())
+        .concurrency(1)
+        .queues(vec!["batched-worker-integration"])
+        .handler(Router::new().route({
+            let received = received.clone();
+            let shutdown = shutdown.clone();
+            move |job: BatchedWorker| {
+                let received = received.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    *received.lock().unwrap() = Some(job.0);
+                    shutdown.notify_one();
+                    Ok::<(), Infallible>(())
+                }
+            }
+        }))
+        .build()
+        .expect("build worker");
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        worker.run(async move { shutdown.notified().await }),
+    )
+    .await
+    .expect("worker run timed out")
+    .expect("worker run");
+
+    let payload = received.lock().unwrap().clone().expect("received payload");
+    assert_eq!(payload, json!([{ "id": 1 }, { "id": 2 }, { "id": 3 }]));
+}
+
+#[tokio::test]
+async fn batched_key_derived_from_payload_folds_together() {
+    // Rust analog of the Node "function-valued key" test — the user
+    // computes a batch key from payload data (via `UniqueKey::tagged_hash_of`
+    // in this case) and passes it as a plain string.
+    let client = fresh().await;
+
+    let tenant_key = UniqueKey::tagged_hash_of("push", &42u64).key;
+
+    let r1 = match client
+        .enqueue(Push(json!({ "deviceIds": ["a"], "tenantId": 42 })))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".deviceIds", 100).keyed_by(tenant_key.clone()))
+        .await
+    {
+        Ok(job) => job,
+        Err(ZizqError::Response { status: 403, .. }) => return,
+        Err(e) => panic!("first enqueue failed: {e:?}"),
+    };
+
+    let r2 = client
+        .enqueue(Push(json!({ "deviceIds": ["b"], "tenantId": 42 })))
+        .queue("batched-integration")
+        .batch(BatchConfig::at(".deviceIds", 100).keyed_by(tenant_key.clone()))
+        .await
+        .expect("second enqueue");
+
+    assert_eq!(r1.folded, Some(false));
+    assert_eq!(r2.folded, Some(true));
+    let batch = r1.batch.expect("batch config returned on enqueue");
+    assert_eq!(batch.key, tenant_key);
+}
+
+#[tokio::test]
+async fn batched_unique_key_plus_batch_is_rejected_with_400() {
+    let client = fresh().await;
+
+    let err = client
+        .enqueue(Push(json!([{ "id": 1 }])))
+        .queue("batched-integration")
+        .unique_key(UniqueKey::raw("some-key"))
+        .batch(BatchConfig::at(".", 100).keyed_by("push"))
+        .await
+        .expect_err("expected server to reject unique_key + batch");
+
+    match err {
+        ZizqError::Response { status: 403, .. } => {} // Pro not enabled — skip
+        ZizqError::Response { status: 400, .. } => {} // expected outcome
+        other => panic!("expected 400 or 403 Response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn batched_invalid_jq_expression_is_rejected_with_422() {
+    let client = fresh().await;
+
+    let err = client
+        .enqueue(Push(json!([{ "id": 1 }])))
+        .queue("batched-integration")
+        .batch(BatchConfig {
+            key: "bad-expr".into(),
+            when: ".[*]".into(), // syntactically invalid
+            fold: "$existing + $new".into(),
+        })
+        .await
+        .expect_err("expected server to reject the invalid expression");
+
+    match err {
+        ZizqError::Response { status: 403, .. } => {} // Pro not enabled — skip
+        ZizqError::Response { status: 422, .. } => {} // expected outcome
+        other => panic!("expected 422 or 403 Response, got {other:?}"),
+    }
 }

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- **Batched jobs** — a new server-side folding mechanism, gated behind
+  a Zizq Pro license on the server. Successive enqueues that share a
+  batch key are folded into a single pending job via configurable jq
+  `when` / `fold` expressions, so the worker eventually claims one job
+  with a combined payload instead of many separate jobs. Useful for
+  push notifications, bulk email, audit-log ingestion, or any
+  downstream API that prefers batches.
+
+  Configure per-job via a new `JobKind::batch` trait method or
+  per-enqueue via `EnqueueBuilder::batch`:
+
+      use zizq::{BatchConfig, JobKind, UniqueKey};
+
+      struct PushNotifications {
+          device_ids: Vec<String>,
+          platform: String,
+      }
+
+      impl JobKind for PushNotifications {
+          const NAME: &'static str = "push.notifications";
+
+          fn batch(&self) -> Option<BatchConfig> {
+              let key = UniqueKey::tagged_hash_of(Self::NAME, &self.platform).key;
+              Some(BatchConfig::at(".device_ids", 100).keyed_by(key))
+          }
+      }
+
+  `BatchConfig::at(path, limit).keyed_by(key)` is a fluent builder for
+  the common "cap a jq path at N entries" case, with `.dedup()` and
+  `.sorted()` modifiers that switch the generated `fold` to `| unique`
+  or `| sort` respectively. `BatchConfig` can also be constructed
+  directly for full control over `when` / `fold`.
+
+  Responses to enqueue calls now include a `folded: Option<bool>`
+  flag on `Job`, mirroring the existing `duplicate` flag. Fetching
+  a job also returns the stored `batch: Option<BatchConfig>` for
+  visibility into what the server will evaluate on subsequent folds.
+
+  Full docs: [Batched Jobs](https://zizq.io/docs/clients/rust/batched-jobs.html).
+
+
 ## 0.5.0
 
 ### Added

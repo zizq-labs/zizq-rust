@@ -6,6 +6,7 @@
 
 use serde::Deserialize;
 
+use crate::batch::BatchConfig;
 use crate::unique_key::{UniqueKey, UniqueScope};
 
 /// The lifecycle state of a job on the server.
@@ -293,6 +294,17 @@ pub struct Job {
     /// set on responses to enqueue requests; `None` everywhere else
     /// (e.g. when reading the job via `GET /jobs/{id}`).
     pub duplicate: Option<bool>,
+
+    /// `Some(true)` when this enqueue was folded into an existing
+    /// pending batched job. Only set on responses to enqueue
+    /// requests; `None` everywhere else.
+    pub folded: Option<bool>,
+
+    /// Batched-job configuration stored on this job, if any. The
+    /// first enqueue's `when`/`fold` are what apply for the life of
+    /// the batch, so reading this back tells you exactly what the
+    /// server is evaluating on subsequent folds.
+    pub batch: Option<BatchConfig>,
 }
 
 // Raw shape of a Job as returned by the API. Flat `unique_key` /
@@ -365,6 +377,14 @@ struct JobFromApi {
     /// `Some(true)` when this job was returned as a duplicate by an enqueue.
     #[serde(default)]
     duplicate: Option<bool>,
+
+    /// `Some(true)` when this enqueue was folded into an existing pending batched job.
+    #[serde(default)]
+    folded: Option<bool>,
+
+    /// Batched-job configuration stored on this job.
+    #[serde(default)]
+    batch: Option<BatchConfig>,
 }
 
 impl From<JobFromApi> for Job {
@@ -392,6 +412,8 @@ impl From<JobFromApi> for Job {
             purge_at: w.purge_at,
             unique_key,
             duplicate: w.duplicate,
+            folded: w.folded,
+            batch: w.batch,
         }
     }
 }

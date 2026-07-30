@@ -20,6 +20,7 @@ use std::time::Duration;
 use serde::{Serialize, Serializer};
 use time::OffsetDateTime;
 
+use crate::batch::BatchConfig;
 use crate::client::{Client, EnqueueRequest};
 use crate::error::ZizqError;
 use crate::job::JobKind;
@@ -92,6 +93,9 @@ pub struct EnqueueBuilder<'a, T> {
 
     /// Optional unique identifier and scope for this job.
     unique_key: Option<UniqueKey>,
+
+    /// Optional batched-job configuration for this job.
+    batch: Option<BatchConfig>,
 }
 
 impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
@@ -156,6 +160,14 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
         self
     }
 
+    /// Attach a batched-job configuration. Overrides any [`BatchConfig`]
+    /// the payload would derive via [`JobKind::batch`]. Opts the enqueue
+    /// into server-side folding — see [`BatchConfig`] for the semantics.
+    pub fn batch(mut self, batch: BatchConfig) -> Self {
+        self.batch = Some(batch);
+        self
+    }
+
     /// Initialize a new `EnqueueBuilder` for the given `Client` and `JobKind`.
     pub(crate) fn new(client: &'a Client, payload: T) -> Self {
         Self {
@@ -168,6 +180,7 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             backoff: None,
             retention: None,
             unique_key: None,
+            batch: None,
         }
     }
 
@@ -185,6 +198,7 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             Some(uk) => (Some(uk.key), uk.scope),
             None => (None, None),
         };
+        let batch = self.batch.or_else(|| self.payload.batch());
         // Box the payload as a type-erased serializer — at body encode
         // time it walks through serde once, directly, without a
         // `serde_json::Value` intermediate allocation. `T: JobKind`
@@ -212,6 +226,7 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             retention: self.retention.or(T::RETENTION),
             unique_key: unique_key_str,
             unique_while: unique_scope,
+            batch,
         })
     }
 }
@@ -455,6 +470,7 @@ mod tests {
             retention: None,
             unique_key: None,
             unique_while: None,
+            batch: None,
         };
 
         let json: serde_json::Value =
@@ -481,6 +497,7 @@ mod tests {
             retention: None,
             unique_key: None,
             unique_while: None,
+            batch: None,
         };
 
         let json: serde_json::Value =
@@ -513,6 +530,7 @@ mod tests {
             }),
             unique_key: None,
             unique_while: None,
+            batch: None,
         };
 
         let json: serde_json::Value =
@@ -583,6 +601,7 @@ mod tests {
             retention: None,
             unique_key: None,
             unique_while: None,
+            batch: None,
         };
 
         // MessagePack: server-side path. Decode as Value to mirror
@@ -618,6 +637,7 @@ mod tests {
             retention: None,
             unique_key: None,
             unique_while: None,
+            batch: None,
         };
         let json: serde_json::Value =
             serde_json::from_slice(&encode_body(&body, Format::Json).unwrap()).unwrap();
@@ -637,6 +657,7 @@ mod tests {
             retention: None,
             unique_key: Some("user:42".to_string()),
             unique_while: Some(UniqueScope::Exists),
+            batch: None,
         };
 
         let json: serde_json::Value =
@@ -644,5 +665,111 @@ mod tests {
 
         assert_eq!(json["unique_key"], "user:42");
         assert_eq!(json["unique_while"], "exists");
+    }
+
+    #[test]
+    fn batch_config_serialises_all_three_fields() {
+        let body = EnqueueRequest {
+            job_type: SendEmail::NAME,
+            queue: SendEmail::QUEUE.to_string(),
+            payload: Box::new(serde_json::json!({ "to": "a@b" })),
+            priority: None,
+            ready_at: None,
+            retry_limit: None,
+            backoff: None,
+            retention: None,
+            unique_key: None,
+            unique_while: None,
+            batch: Some(BatchConfig {
+                key: "push:42".into(),
+                when: "$existing.n < 100".into(),
+                fold: "$existing | .n += 1".into(),
+            }),
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&encode_body(&body, Format::Json).unwrap()).unwrap();
+
+        assert_eq!(json["batch"]["key"], "push:42");
+        assert_eq!(json["batch"]["when"], "$existing.n < 100");
+        assert_eq!(json["batch"]["fold"], "$existing | .n += 1");
+    }
+
+    #[test]
+    fn builder_batch_overrides_jobkind_batch() {
+        // Payload type with a default batch config on the trait.
+        #[derive(Debug, Serialize, Deserialize)]
+        struct Notify {
+            user: String,
+        }
+        impl JobKind for Notify {
+            const NAME: &'static str = "notify";
+            fn batch(&self) -> Option<BatchConfig> {
+                Some(BatchConfig {
+                    key: format!("notify:{}", self.user),
+                    when: "true".into(),
+                    fold: "$new".into(),
+                })
+            }
+        }
+
+        // No override → the trait's config is used.
+        let client = Client::builder().url("http://x").build().unwrap();
+        let req = EnqueueBuilder::new(
+            &client,
+            Notify {
+                user: "alice".into(),
+            },
+        )
+        .into_request()
+        .unwrap();
+        let batch = req.batch.expect("batch from JobKind");
+        assert_eq!(batch.key, "notify:alice");
+        assert_eq!(batch.when, "true");
+
+        // With override → the builder wins.
+        let req = EnqueueBuilder::new(
+            &client,
+            Notify {
+                user: "alice".into(),
+            },
+        )
+        .batch(BatchConfig {
+            key: "override".into(),
+            when: "$new.x > 0".into(),
+            fold: "$existing".into(),
+        })
+        .into_request()
+        .unwrap();
+        let batch = req.batch.expect("batch from builder");
+        assert_eq!(batch.key, "override");
+        assert_eq!(batch.when, "$new.x > 0");
+    }
+
+    #[test]
+    fn job_response_deserialises_folded_and_batch() {
+        let job = serde_json::json!({
+            "id": "abc",
+            "type": "send_email",
+            "queue": "emails",
+            "status": "ready",
+            "priority": 50,
+            "ready_at": 0,
+            "attempts": 0,
+            "payload": { "to": "a@b" },
+            "folded": true,
+            "batch": {
+                "key": "push:42",
+                "when": "true",
+                "fold": "$new"
+            }
+        });
+        let bytes = serde_json::to_vec(&job).unwrap();
+        let parsed: Job = decode_body(&bytes, Format::Json).unwrap();
+        assert_eq!(parsed.folded, Some(true));
+        let b = parsed.batch.expect("batch present");
+        assert_eq!(b.key, "push:42");
+        assert_eq!(b.when, "true");
+        assert_eq!(b.fold, "$new");
     }
 }

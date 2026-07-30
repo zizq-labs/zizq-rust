@@ -96,6 +96,14 @@ constant, then to the server default.
                 <a href="./unique-jobs.md">Unique Jobs</a>.
             </td>
         </tr>
+        <tr>
+            <td><code>batch</code></td>
+            <td>
+                Attach a <code>BatchConfig</code> to fold this enqueue into
+                an existing pending job — see
+                <a href="./batched-jobs.md">Batched Jobs</a>.
+            </td>
+        </tr>
     </tbody>
 </table>
 

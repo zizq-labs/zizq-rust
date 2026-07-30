@@ -429,6 +429,8 @@ mod tests {
             purge_at: None,
             unique_key: None,
             duplicate: None,
+            folded: None,
+            batch: None,
         }
     }
 

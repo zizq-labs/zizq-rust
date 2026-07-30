@@ -34,7 +34,7 @@ zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
       TCP keep-alive
 - JSON or MessagePack API formats (MessagePack by default)
 - `JobKind` trait for per-type defaults (queue, priority, retry
-      limit, backoff, retention, uniqueness key)
+      limit, backoff, retention, uniqueness key, batched job config)
 - Single-job enqueue via a builder that resolves trait
       defaults and per-call overrides
 - Bulk enqueue — many jobs submitted in a single request

@@ -117,7 +117,7 @@ jobs:
 
       - name: Read version
         id: version
-        run: echo "version=$(cargo pkgid | sed 's/.*[#@]//')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(cargo pkgid -p zizq | sed 's/.*[#@]//')" >> "$GITHUB_OUTPUT"
 
       - name: Build release artifact
         run: |
@@ -218,7 +218,7 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --no-verify
+        run: cargo publish -p zizq --no-verify
 
       - name: Download package artifact
         uses: actions/download-artifact@v8
@@ -229,7 +229,7 @@ jobs:
       - name: Extract release notes from CHANGELOG
         run: |
           version=${{ needs.package.outputs.version }}
-          sed -n "/^## ${version}/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2 > release-notes.md
+          sed -n "/^## ${version}/,/^## /p" zizq/CHANGELOG.md | head -n -1 | tail -n +2 > release-notes.md
 
       - name: Create GitHub Release
         env:

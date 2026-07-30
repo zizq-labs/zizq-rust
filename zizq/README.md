@@ -6,18 +6,6 @@ self-contained job queue server.
 [![CI](https://github.com/zizq-labs/zizq-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/zizq-labs/zizq-rust/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/zizq.svg)](https://crates.io/crates/zizq)
 
-## Repository Layout
-
-This repository is a Cargo workspace. You likely want to start with the
-`zizq` crate; the surrounding directories exist to support development
-and release of that crate.
-
-| Path            | Contents                                                                                          |
-| --------------- | ------------------------------------------------------------------------------------------------- |
-| `zizq/`         | The `zizq` crate itself — the library published to crates.io. Source, tests, examples, CHANGELOG. |
-| `docs/`         | The mdBook source for the [Rust Client Docs](https://zizq.io/docs/clients/rust/).                 |
-| `integration/`  | End-to-end integration tests that run against a real Zizq server (see `integration/run.sh`).            |
-
 ## Installation
 
 Add the crate with Cargo:
@@ -37,7 +25,7 @@ platform's native TLS library.
 
 ```toml
 [dependencies]
-zizq = { version = "0.6", default-features = false, features = ["native-tls"] }
+zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
 ```
 
 ## Features
@@ -261,7 +249,6 @@ reconnect logic without `Router`'s type-driven dispatch.
 * [Zizq Command Reference](https://zizq.io/docs/cli/)
 * [Zizq Rust Client Source](https://github.com/zizq-labs/zizq-rust)
 * [Zizq Source](https://github.com/zizq-labs/zizq)
-* [Changelog](zizq/CHANGELOG.md)
 
 ## Support & Feedback
 
@@ -272,4 +259,4 @@ welcome.
 
 ## License
 
-MIT — see [LICENSE](zizq/LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -119,6 +119,7 @@ mod enqueue;
 mod error;
 mod failure;
 mod format;
+mod hashable;
 mod job;
 mod job_filter;
 mod job_patch;

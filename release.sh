@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
-# Build a release artifact for the Zizq Rust client.
+# Build release artifacts for the Zizq Rust client.
 #
-# Produces:
+# Produces (both crates go out in lockstep):
 #   target/release/zizq-<version>.crate
 #   target/release/zizq-<version>.crate.sha256
+#   target/release/zizq-derive-<version>.crate
+#   target/release/zizq-derive-<version>.crate.sha256
 #
 # Usage:
 #   ./release.sh                          # build only
@@ -17,10 +19,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Read version from Cargo's source of truth. `-p zizq` is required in
-# a workspace with multiple potential members.
+# Read version from Cargo's source of truth. Both crates share a
+# version (see `[workspace.package] version` in `Cargo.toml`).
 VERSION="$(cargo pkgid -p zizq | sed 's/.*[#@]//')"
 CRATE="zizq-${VERSION}.crate"
+MACRO_CRATE="zizq-derive-${VERSION}.crate"
 OUT_DIR="target/release"
 
 echo "==> Zizq Rust Client v${VERSION}"
@@ -38,22 +41,28 @@ if [[ "${1:-}" == "--check" ]]; then
     shift
 fi
 
-# Build the .crate file (cargo emits it to target/package/). Any
-# remaining arguments are forwarded — pass --allow-dirty locally when
-# iterating with uncommitted changes. CI runs from a clean checkout so
-# no flag is needed there.
+# Package both crates in one invocation. Passing `-p` for each member
+# (rather than `--workspace`) is deliberate — it stays explicit about
+# what's being packaged even if the workspace grows dev-only members
+# in future. `cargo package` topologically resolves inter-workspace
+# deps via a local `target/package/tmp-registry`, so `zizq` verifies
+# against the just-packaged `zizq-derive` without needing anything
+# on crates.io (this was stabilised alongside the `package-workspace`
+# Cargo feature — see https://github.com/rust-lang/cargo/issues/10948).
 echo "    Packaging..."
-cargo package -p zizq "$@"
+cargo package -p zizq-derive -p zizq "$@"
 
-# Mirror the convention in our other clients by surfacing the artifact under
-# target/release/ alongside its checksum.
+# Surface both artifacts under target/release/ alongside their sha256s.
 mkdir -p "$OUT_DIR"
 cp "target/package/${CRATE}" "${OUT_DIR}/${CRATE}"
+cp "target/package/${MACRO_CRATE}" "${OUT_DIR}/${MACRO_CRATE}"
 
-# Checksum.
-echo "    Computing checksum..."
+echo "    Computing checksums..."
 (cd "$OUT_DIR" && shasum -a 256 "$CRATE" > "${CRATE}.sha256")
+(cd "$OUT_DIR" && shasum -a 256 "$MACRO_CRATE" > "${MACRO_CRATE}.sha256")
 
 echo "==> Done."
 echo "    ${OUT_DIR}/${CRATE}"
 echo "    ${OUT_DIR}/${CRATE}.sha256"
+echo "    ${OUT_DIR}/${MACRO_CRATE}"
+echo "    ${OUT_DIR}/${MACRO_CRATE}.sha256"

@@ -4,21 +4,30 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# Declared as its own workspace root so cargo doesn't try to
+# associate it with the outer `clients/rust/Cargo.toml` workspace.
+# The integration crate is intentionally standalone — it builds
+# against packaged `.crate` artifacts unpacked by `run.sh` into
+# `./zizq/` and `./zizq-derive/`, not against the workspace source.
+[workspace]
+
 # The `zizq` dependency is a `path` dependency pointing at `./zizq`,
 # which `run.sh` populates by extracting the packaged `.crate`
-# artifact. The integration tests therefore build against the exact
-# published artifact, not the local source tree. The path is stable
-# (always `./zizq`) regardless of the crate version.
-# TODO: re-enable the `derive` feature (default-on in `zizq`) once
-# `run.sh` learns to unpack the `zizq-derive` sibling `.crate` and
-# points at it via `[patch.crates-io]`. Until then, the packaged
-# `zizq.crate` we build against here would try to resolve
-# `zizq-derive` from crates.io, which fails before the sibling is
-# published. Opting out keeps integration tests decoupled from the
-# derive rollout.
+# artifact. Default features (including `derive`) are enabled, which
+# also pulls in `zizq-derive` — that sibling is unpacked into
+# `./zizq-derive` by `run.sh` and redirected via `[patch.crates-io]`
+# below so the version-pinned dep resolves locally without needing
+# crates.io. The integration tests therefore build against the exact
+# published artifacts, not the local source tree.
 [dev-dependencies]
-zizq = { path = "zizq", default-features = false, features = ["rustls-tls"] }
+zizq = { path = "zizq" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Redirect `zizq-derive` (a version-pinned dep of the packaged
+# `zizq.crate`) to the sibling `.crate` unpacked by `run.sh`. Without
+# this the resolver would try crates.io.
+[patch.crates-io]
+zizq-derive = { path = "zizq-derive" }

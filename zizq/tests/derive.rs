@@ -11,7 +11,7 @@
 #![cfg(feature = "derive")]
 
 use serde::{Deserialize, Serialize};
-use zizq::{BackoffConfig, JobKind, RetentionConfig, UniqueKey, UniqueScope};
+use zizq::{BackoffConfig, BatchConfig, JobKind, RetentionConfig, UniqueKey, UniqueScope};
 
 #[test]
 fn defaults_come_from_the_trait_when_no_attrs_are_set() {
@@ -294,4 +294,154 @@ fn unique_composes_only_scope_and_prefix() {
     // is the hash of `{"platform": "apple"}`.
     let expected = UniqueKey::hash_of(&serde_json::json!({ "platform": "apple" }));
     assert_eq!(key.key, expected.key);
+}
+
+// --- batch ---
+
+#[test]
+fn bare_batch_emits_config_and_default_key() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".device_ids", limit = 100))]
+    struct Push {
+        device_ids: Vec<String>,
+        platform: String,
+    }
+    let job = Push {
+        device_ids: vec!["a".into()],
+        platform: "apple".into(),
+    };
+    let cfg = job.batch().expect("batch returned Some");
+    // The BatchConfig::at builder round-trip: same when/fold as a
+    // hand-rolled call.
+    let expected = BatchConfig::at(".device_ids", 100).keyed_by(cfg.key.clone());
+    assert_eq!(cfg.when, expected.when);
+    assert_eq!(cfg.fold, expected.fold);
+    // Default key = payload minus the batch path, tagged with type
+    // name. So `platform` alone drives the key.
+    let expected_key =
+        UniqueKey::tagged_hash_of(Push::NAME, &serde_json::json!({ "platform": "apple" }));
+    assert_eq!(cfg.key, expected_key.key);
+}
+
+#[test]
+fn batch_dedup_switches_the_fold_expression() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".ids", limit = 100, dedup))]
+    struct Bag {
+        ids: Vec<u32>,
+    }
+    let cfg = Bag { ids: vec![1] }.batch().unwrap();
+    let expected = BatchConfig::at(".ids", 100)
+        .dedup()
+        .keyed_by(cfg.key.clone());
+    assert_eq!(cfg.fold, expected.fold);
+}
+
+#[test]
+fn batch_sorted_switches_the_fold_expression() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".ids", limit = 100, sorted))]
+    struct Bag {
+        ids: Vec<u32>,
+    }
+    let cfg = Bag { ids: vec![1] }.batch().unwrap();
+    let expected = BatchConfig::at(".ids", 100)
+        .sorted()
+        .keyed_by(cfg.key.clone());
+    assert_eq!(cfg.fold, expected.fold);
+}
+
+#[test]
+fn batch_key_only_narrows_the_hash_subset() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".device_ids", limit = 100, key(only = [".platform"])))]
+    struct Push {
+        device_ids: Vec<String>,
+        platform: String,
+        tenant_id: u64,
+    }
+    let a = Push {
+        device_ids: vec!["a".into()],
+        platform: "apple".into(),
+        tenant_id: 42,
+    };
+    let b = Push {
+        // Different device_ids AND tenant_id, but same platform.
+        device_ids: vec!["b".into(), "c".into()],
+        platform: "apple".into(),
+        tenant_id: 99,
+    };
+    // key(only = [".platform"]) means only platform contributes —
+    // both keys collapse.
+    assert_eq!(a.batch().unwrap().key, b.batch().unwrap().key);
+}
+
+#[test]
+fn batch_key_except_is_additive_to_the_batch_path() {
+    // The batch path is always excluded from the key; `except`
+    // adds more exclusions on top.
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".device_ids", limit = 100, key(except = [".internal"])))]
+    struct Push {
+        device_ids: Vec<String>,
+        platform: String,
+        internal: String,
+    }
+    let a = Push {
+        device_ids: vec!["x".into()],
+        platform: "apple".into(),
+        internal: "aaa".into(),
+    };
+    let b = Push {
+        // Both device_ids (batch path) and internal (except path)
+        // differ — key still collides because both are excluded.
+        device_ids: vec!["y".into(), "z".into()],
+        platform: "apple".into(),
+        internal: "bbb".into(),
+    };
+    assert_eq!(a.batch().unwrap().key, b.batch().unwrap().key);
+    // But differing on a non-excluded field breaks the collision.
+    let c = Push {
+        device_ids: vec!["x".into()],
+        platform: "android".into(),
+        internal: "aaa".into(),
+    };
+    assert_ne!(a.batch().unwrap().key, c.batch().unwrap().key);
+}
+
+#[test]
+fn batch_key_prefix_false_uses_untagged_hash() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".device_ids", limit = 100, key(prefix = false)))]
+    struct Push {
+        device_ids: Vec<String>,
+        platform: String,
+    }
+    let job = Push {
+        device_ids: vec!["a".into()],
+        platform: "apple".into(),
+    };
+    let cfg = job.batch().unwrap();
+    // With prefix off, key = hash_of({"platform": "apple"}).
+    let expected = UniqueKey::hash_of(&serde_json::json!({ "platform": "apple" }));
+    assert_eq!(cfg.key, expected.key);
+    // And it's NOT the tagged form.
+    let tagged = UniqueKey::tagged_hash_of(Push::NAME, &serde_json::json!({ "platform": "apple" }));
+    assert_ne!(cfg.key, tagged.key);
+}
+
+#[test]
+fn batch_limit_accepts_arithmetic_expressions() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(batch(path = ".ids", limit = 25 * 4))]
+    struct Bag {
+        ids: Vec<u32>,
+    }
+    let cfg = Bag { ids: vec![1] }.batch().unwrap();
+    // The `when` expression should mention `100` (the evaluated limit).
+    assert!(
+        cfg.when.contains("100"),
+        "expected when to embed 100, got {}",
+        cfg.when,
+    );
 }

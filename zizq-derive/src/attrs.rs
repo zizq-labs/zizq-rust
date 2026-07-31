@@ -59,6 +59,11 @@ pub(crate) struct ZizqAttrs {
     /// scope = "...", prefix = false))]` — emits a
     /// [`JobKind::unique_key`] implementation.
     pub unique: Option<UniqueAttr>,
+
+    /// `#[zizq(batch(path = "...", limit = <expr>, dedup|sorted,
+    /// key(only = [...] | except = [...], prefix = false)))]` — emits
+    /// a [`JobKind::batch`] implementation.
+    pub batch: Option<BatchAttr>,
 }
 
 /// Parsed contents of `#[zizq(unique(...))]`. All fields are
@@ -106,6 +111,55 @@ pub(crate) enum UniqueScopeAttr {
     Queued,
     Active,
     Exists,
+}
+
+/// Parsed contents of `#[zizq(batch(...))]`. `path` and `limit` are
+/// required — the parser rejects the whole attribute if either is
+/// missing.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct BatchAttr {
+    /// `path = "..."` — jq path to the field being accumulated.
+    /// Validated at parse time by [`crate::jq_path::parse`].
+    pub path: LitStr,
+
+    /// `limit = <expr>` — max entries before the current batch seals.
+    pub limit: Expr,
+
+    /// `dedup` or `sorted` (mutually exclusive), or default append.
+    pub fold: BatchFoldMode,
+
+    /// Optional `key(...)` inner config controlling the batch key
+    /// derivation. When absent, the derive hashes `payload - path`
+    /// with the type name as tag prefix.
+    pub key: Option<BatchKeyConfig>,
+}
+
+/// Modifier that selects the shape of the emitted `fold` jq
+/// expression. See [`zizq::BatchConfig`] for the resulting shapes.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(crate) enum BatchFoldMode {
+    /// Default — `$existing | .<path> += ($new | .<path>)`.
+    Append,
+    /// Bare `dedup` flag — `... | unique`.
+    Dedup,
+    /// Bare `sorted` flag — `... | sort`.
+    Sorted,
+}
+
+/// Parsed contents of `#[zizq(batch(..., key(...)))]`.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Default)]
+pub(crate) struct BatchKeyConfig {
+    /// Path-set narrowing the payload before hashing. `Only` and
+    /// `Except` are mutually exclusive. **Additive semantics**: the
+    /// batch `path` is always excluded from the hash regardless of
+    /// this setting — an `except = [...]` list adds to that exclusion
+    /// rather than replacing it.
+    pub selection: Option<UniqueSelection>,
+
+    /// `prefix = true | false`. When `None`, treated as `true` — the
+    /// type name is used as the hash's tag prefix.
+    pub prefix: Option<LitBool>,
 }
 
 /// Parsed contents of `#[zizq(backoff(...))]`. Every field is populated
@@ -195,6 +249,12 @@ impl ZizqAttrs {
                         } else {
                             attrs.unique = Some(UniqueAttr::default());
                         }
+                    }
+                    "batch" => {
+                        if attrs.batch.is_some() {
+                            return Err(meta.error("duplicate `batch` attribute"));
+                        }
+                        attrs.batch = Some(parse_batch(&meta)?);
                     }
                     other => {
                         return Err(meta.error(format!("unknown `zizq` attribute `{other}`")));
@@ -392,6 +452,122 @@ fn parse_str_array(inner: &syn::meta::ParseNestedMeta) -> syn::Result<Vec<LitStr
             )),
         })
         .collect()
+}
+
+/// Parse the `(path = "...", limit = <expr>, dedup|sorted, key(...))`
+/// body of a `#[zizq(batch(...))]` attribute.
+///
+/// `path` and `limit` are required. `dedup` and `sorted` are bare
+/// flag modifiers, mutually exclusive. `key(...)` is optional and
+/// mirrors the shape of `unique(only|except, prefix)` — it configures
+/// how the batch key is derived from the payload.
+fn parse_batch(meta: &syn::meta::ParseNestedMeta) -> syn::Result<BatchAttr> {
+    let mut path: Option<LitStr> = None;
+    let mut limit: Option<Expr> = None;
+    let mut fold = BatchFoldMode::Append;
+    let mut key: Option<BatchKeyConfig> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "path" => {
+                if path.is_some() {
+                    return Err(inner.error("duplicate `path` field"));
+                }
+                path = Some(inner.value()?.parse::<LitStr>()?);
+            }
+            "limit" => {
+                if limit.is_some() {
+                    return Err(inner.error("duplicate `limit` field"));
+                }
+                limit = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "dedup" => {
+                if !matches!(fold, BatchFoldMode::Append) {
+                    return Err(
+                        inner.error("`dedup` and `sorted` are mutually exclusive on `batch(...)`")
+                    );
+                }
+                fold = BatchFoldMode::Dedup;
+            }
+            "sorted" => {
+                if !matches!(fold, BatchFoldMode::Append) {
+                    return Err(
+                        inner.error("`dedup` and `sorted` are mutually exclusive on `batch(...)`")
+                    );
+                }
+                fold = BatchFoldMode::Sorted;
+            }
+            "key" => {
+                if key.is_some() {
+                    return Err(inner.error("duplicate `key` field"));
+                }
+                key = Some(parse_batch_key(&inner)?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `batch` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    match (path, limit) {
+        (Some(path), Some(limit)) => Ok(BatchAttr {
+            path,
+            limit,
+            fold,
+            key,
+        }),
+        _ => Err(meta.error("`batch(...)` requires both `path = \"...\"` and `limit = <expr>`")),
+    }
+}
+
+/// Parse the `(only = [...] | except = [...], prefix = ...)` body of
+/// a `#[zizq(batch(..., key(...)))]` attribute. Same shape as the
+/// `unique(...)` body minus the `scope` field.
+fn parse_batch_key(meta: &syn::meta::ParseNestedMeta) -> syn::Result<BatchKeyConfig> {
+    let mut only: Option<Vec<LitStr>> = None;
+    let mut except: Option<Vec<LitStr>> = None;
+    let mut prefix: Option<LitBool> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "only" => {
+                if only.is_some() {
+                    return Err(inner.error("duplicate `only` field"));
+                }
+                only = Some(parse_str_array(&inner)?);
+            }
+            "except" => {
+                if except.is_some() {
+                    return Err(inner.error("duplicate `except` field"));
+                }
+                except = Some(parse_str_array(&inner)?);
+            }
+            "prefix" => {
+                if prefix.is_some() {
+                    return Err(inner.error("duplicate `prefix` field"));
+                }
+                prefix = Some(inner.value()?.parse::<LitBool>()?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `key` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    let selection = match (only, except) {
+        (Some(_), Some(_)) => {
+            return Err(meta.error("`only` and `except` are mutually exclusive on `key(...)`"));
+        }
+        (Some(paths), None) => Some(UniqueSelection::Only(paths)),
+        (None, Some(paths)) => Some(UniqueSelection::Except(paths)),
+        (None, None) => None,
+    };
+
+    Ok(BatchKeyConfig { selection, prefix })
 }
 
 #[cfg(test)]
@@ -843,6 +1019,150 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string().contains("duplicate `unique`"),
+            "unexpected error: {err}",
+        );
+    }
+
+    // --- batch ---
+
+    #[test]
+    fn parses_minimal_batch() {
+        let attrs =
+            parse_str(r#"#[zizq(batch(path = ".deviceIds", limit = 100))] struct Foo;"#).unwrap();
+        let b = attrs.batch.unwrap();
+        assert_eq!(b.path.value(), ".deviceIds");
+        assert_eq!(expr_tokens(&b.limit), "100");
+        assert!(matches!(b.fold, BatchFoldMode::Append));
+        assert!(b.key.is_none());
+    }
+
+    #[test]
+    fn batch_accepts_arithmetic_limit() {
+        let attrs =
+            parse_str(r#"#[zizq(batch(path = ".x", limit = 50 * 2))] struct Foo;"#).unwrap();
+        assert_eq!(expr_tokens(&attrs.batch.unwrap().limit), "50 * 2");
+    }
+
+    #[test]
+    fn batch_missing_path_errors() {
+        let err = parse_str(r#"#[zizq(batch(limit = 100))] struct Foo;"#).unwrap_err();
+        assert!(
+            err.to_string().contains("requires both"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn batch_missing_limit_errors() {
+        let err = parse_str(r#"#[zizq(batch(path = ".x"))] struct Foo;"#).unwrap_err();
+        assert!(
+            err.to_string().contains("requires both"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn batch_unknown_field_errors() {
+        let err = parse_str(r#"#[zizq(batch(path = ".x", limit = 100, bogus = 1))] struct Foo;"#)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown `batch` field"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn batch_dedup_flag_parses() {
+        let attrs =
+            parse_str(r#"#[zizq(batch(path = ".x", limit = 100, dedup))] struct Foo;"#).unwrap();
+        assert!(matches!(attrs.batch.unwrap().fold, BatchFoldMode::Dedup));
+    }
+
+    #[test]
+    fn batch_sorted_flag_parses() {
+        let attrs =
+            parse_str(r#"#[zizq(batch(path = ".x", limit = 100, sorted))] struct Foo;"#).unwrap();
+        assert!(matches!(attrs.batch.unwrap().fold, BatchFoldMode::Sorted));
+    }
+
+    #[test]
+    fn batch_dedup_and_sorted_together_error() {
+        let err =
+            parse_str(r#"#[zizq(batch(path = ".x", limit = 100, dedup, sorted))] struct Foo;"#)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn batch_key_only_parses() {
+        let attrs = parse_str(
+            r#"#[zizq(batch(path = ".x", limit = 100, key(only = [".platform"])))] struct Foo;"#,
+        )
+        .unwrap();
+        let b = attrs.batch.unwrap();
+        let sel = b.key.unwrap().selection.unwrap();
+        assert!(matches!(sel, UniqueSelection::Only(_)));
+    }
+
+    #[test]
+    fn batch_key_except_parses() {
+        let attrs = parse_str(
+            r#"#[zizq(batch(path = ".x", limit = 100, key(except = [".secret"])))] struct Foo;"#,
+        )
+        .unwrap();
+        let b = attrs.batch.unwrap();
+        let sel = b.key.unwrap().selection.unwrap();
+        assert!(matches!(sel, UniqueSelection::Except(_)));
+    }
+
+    #[test]
+    fn batch_key_only_and_except_together_error() {
+        let err = parse_str(
+            r#"#[zizq(batch(path = ".x", limit = 100, key(only = [".a"], except = [".b"])))] struct Foo;"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn batch_key_prefix_false_parses() {
+        let attrs = parse_str(
+            r#"#[zizq(batch(path = ".x", limit = 100, key(prefix = false)))] struct Foo;"#,
+        )
+        .unwrap();
+        let b = attrs.batch.unwrap();
+        assert_eq!(b.key.unwrap().prefix.unwrap().value, false);
+    }
+
+    #[test]
+    fn batch_key_unknown_field_errors() {
+        let err =
+            parse_str(r#"#[zizq(batch(path = ".x", limit = 100, key(bogus = 1)))] struct Foo;"#)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown `key` field"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn duplicate_batch_attribute_errors() {
+        let err = parse_str(
+            r#"
+            #[zizq(batch(path = ".a", limit = 10))]
+            #[zizq(batch(path = ".b", limit = 20))]
+            struct Foo;
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `batch`"),
             "unexpected error: {err}",
         );
     }

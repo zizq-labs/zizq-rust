@@ -9,15 +9,22 @@
 //! set it — that way the emitter can decide whether to emit an
 //! override or let the trait's default apply.
 
-use syn::{DeriveInput, LitInt, LitStr};
+use syn::{DeriveInput, Expr, LitStr};
 
 /// Container-level `#[zizq(...)]` attributes recognised on a
 /// `#[derive(JobKind)]` struct.
 ///
-/// `Debug` is only derived under `cfg(test)` — `syn::LitStr` /
-/// `syn::LitInt` require syn's `extra-traits` feature for it, which
+/// `Debug` is only derived under `cfg(test)` — `syn::Expr` /
+/// `syn::LitStr` require syn's `extra-traits` feature for it, which
 /// this crate only enables in dev-dependencies to avoid paying the
 /// cost in the shipped proc-macro.
+///
+/// Numeric fields are stored as [`Expr`] rather than a literal type
+/// so users can write const-evaluable arithmetic (e.g.
+/// `dead_ms = 7 * 24 * 60 * 60 * 1000`). The trade-off: range
+/// validation happens at Rust's const-eval time on the generated
+/// code, not at derive expansion, so an overflow error points at
+/// the trait's const declaration rather than the user's literal.
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug))]
 pub(crate) struct ZizqAttrs {
@@ -28,13 +35,45 @@ pub(crate) struct ZizqAttrs {
     /// `#[zizq(queue = "...")]` — overrides [`JobKind::QUEUE`].
     pub queue: Option<LitStr>,
 
-    /// `#[zizq(priority = N)]` — overrides [`JobKind::PRIORITY`].
-    /// Validated to fit in `u16` at parse time.
-    pub priority: Option<LitInt>,
+    /// `#[zizq(priority = <expr>)]` — overrides [`JobKind::PRIORITY`].
+    /// Any const-evaluable expression that fits in `u16`.
+    pub priority: Option<Expr>,
 
-    /// `#[zizq(retry_limit = N)]` — overrides [`JobKind::RETRY_LIMIT`].
-    /// Validated to fit in `u32` at parse time.
-    pub retry_limit: Option<LitInt>,
+    /// `#[zizq(retry_limit = <expr>)]` — overrides
+    /// [`JobKind::RETRY_LIMIT`]. Any const-evaluable expression that
+    /// fits in `u32`.
+    pub retry_limit: Option<Expr>,
+
+    /// `#[zizq(backoff(base_ms = ..., exponent = ..., jitter_ms = ...))]`
+    /// — overrides [`JobKind::BACKOFF`]. All three inner fields are
+    /// required.
+    pub backoff: Option<BackoffAttr>,
+
+    /// `#[zizq(retention(completed_ms = ..., dead_ms = ...))]` —
+    /// overrides [`JobKind::RETENTION`]. Each inner field is optional
+    /// individually but at least one must be present, otherwise the
+    /// override is meaningless.
+    pub retention: Option<RetentionAttr>,
+}
+
+/// Parsed contents of `#[zizq(backoff(...))]`. Every field is populated
+/// by the time this struct is stored on [`ZizqAttrs`] — the parser
+/// rejects the whole attribute if any is missing.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct BackoffAttr {
+    pub base_ms: Expr,
+    pub exponent: Expr,
+    pub jitter_ms: Expr,
+}
+
+/// Parsed contents of `#[zizq(retention(...))]`. Both fields are
+/// `Option` because the outer attribute is a partial override — the
+/// user can set only `completed_ms`, only `dead_ms`, or both, and the
+/// unspecified field falls through to the server's default.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct RetentionAttr {
+    pub completed_ms: Option<Expr>,
+    pub dead_ms: Option<Expr>,
 }
 
 impl ZizqAttrs {
@@ -72,20 +111,25 @@ impl ZizqAttrs {
                         if attrs.priority.is_some() {
                             return Err(meta.error("duplicate `priority` attribute"));
                         }
-                        let lit: LitInt = meta.value()?.parse()?;
-                        // Validate range up front so the error span
-                        // points at the user's literal, not at the
-                        // derive-generated code.
-                        lit.base10_parse::<u16>()?;
-                        attrs.priority = Some(lit);
+                        attrs.priority = Some(meta.value()?.parse::<Expr>()?);
                     }
                     "retry_limit" => {
                         if attrs.retry_limit.is_some() {
                             return Err(meta.error("duplicate `retry_limit` attribute"));
                         }
-                        let lit: LitInt = meta.value()?.parse()?;
-                        lit.base10_parse::<u32>()?;
-                        attrs.retry_limit = Some(lit);
+                        attrs.retry_limit = Some(meta.value()?.parse::<Expr>()?);
+                    }
+                    "backoff" => {
+                        if attrs.backoff.is_some() {
+                            return Err(meta.error("duplicate `backoff` attribute"));
+                        }
+                        attrs.backoff = Some(parse_backoff(&meta)?);
+                    }
+                    "retention" => {
+                        if attrs.retention.is_some() {
+                            return Err(meta.error("duplicate `retention` attribute"));
+                        }
+                        attrs.retention = Some(parse_retention(&meta)?);
                     }
                     other => {
                         return Err(meta.error(format!("unknown `zizq` attribute `{other}`")));
@@ -97,6 +141,97 @@ impl ZizqAttrs {
 
         Ok(attrs)
     }
+}
+
+/// Parse the `(base_ms = ..., exponent = ..., jitter_ms = ...)` body
+/// of a `#[zizq(backoff(...))]` attribute. All three fields are
+/// required — a missing field is a compile error with a span on the
+/// outer `backoff` keyword (the natural place for the user to add it).
+fn parse_backoff(meta: &syn::meta::ParseNestedMeta) -> syn::Result<BackoffAttr> {
+    let mut base_ms: Option<Expr> = None;
+    let mut exponent: Option<Expr> = None;
+    let mut jitter_ms: Option<Expr> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "base_ms" => {
+                if base_ms.is_some() {
+                    return Err(inner.error("duplicate `base_ms` field"));
+                }
+                base_ms = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "exponent" => {
+                if exponent.is_some() {
+                    return Err(inner.error("duplicate `exponent` field"));
+                }
+                exponent = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "jitter_ms" => {
+                if jitter_ms.is_some() {
+                    return Err(inner.error("duplicate `jitter_ms` field"));
+                }
+                jitter_ms = Some(inner.value()?.parse::<Expr>()?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `backoff` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    match (base_ms, exponent, jitter_ms) {
+        (Some(base_ms), Some(exponent), Some(jitter_ms)) => Ok(BackoffAttr {
+            base_ms,
+            exponent,
+            jitter_ms,
+        }),
+        _ => {
+            Err(meta.error("`backoff(...)` requires all of `base_ms`, `exponent`, and `jitter_ms`"))
+        }
+    }
+}
+
+/// Parse the `(completed_ms = ..., dead_ms = ...)` body of a
+/// `#[zizq(retention(...))]` attribute. Both fields are optional but
+/// the attribute as a whole must set at least one — an empty
+/// `retention()` is a compile error since it's a no-op.
+fn parse_retention(meta: &syn::meta::ParseNestedMeta) -> syn::Result<RetentionAttr> {
+    let mut completed_ms: Option<Expr> = None;
+    let mut dead_ms: Option<Expr> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "completed_ms" => {
+                if completed_ms.is_some() {
+                    return Err(inner.error("duplicate `completed_ms` field"));
+                }
+                completed_ms = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "dead_ms" => {
+                if dead_ms.is_some() {
+                    return Err(inner.error("duplicate `dead_ms` field"));
+                }
+                dead_ms = Some(inner.value()?.parse::<Expr>()?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `retention` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    if completed_ms.is_none() && dead_ms.is_none() {
+        return Err(
+            meta.error("`retention(...)` requires at least one of `completed_ms` or `dead_ms`")
+        );
+    }
+
+    Ok(RetentionAttr {
+        completed_ms,
+        dead_ms,
+    })
 }
 
 #[cfg(test)]
@@ -129,16 +264,40 @@ mod tests {
         assert_eq!(attrs.queue.unwrap().value(), "emails");
     }
 
+    /// Helper — round-trip an [`Expr`] through the token stream so we
+    /// can compare the parsed contents by shape rather than value.
+    /// Integration tests in `zizq/tests/derive.rs` verify actual
+    /// runtime const values.
+    fn expr_tokens(expr: &Expr) -> String {
+        use quote::ToTokens;
+        expr.to_token_stream().to_string()
+    }
+
     #[test]
     fn parses_priority() {
         let attrs = parse_str(r#"#[zizq(priority = 100)] struct Foo;"#).unwrap();
-        assert_eq!(attrs.priority.unwrap().base10_parse::<u16>().unwrap(), 100);
+        assert_eq!(expr_tokens(&attrs.priority.unwrap()), "100");
     }
 
     #[test]
     fn parses_retry_limit() {
         let attrs = parse_str(r#"#[zizq(retry_limit = 5)] struct Foo;"#).unwrap();
-        assert_eq!(attrs.retry_limit.unwrap().base10_parse::<u32>().unwrap(), 5,);
+        assert_eq!(expr_tokens(&attrs.retry_limit.unwrap()), "5");
+    }
+
+    #[test]
+    fn parses_priority_from_arithmetic_expression() {
+        // Numeric fields accept any const-evaluable expression, not
+        // just literals. Overflow is caught at Rust's const-eval time
+        // on the generated code.
+        let attrs = parse_str(r#"#[zizq(priority = 50 + 50)] struct Foo;"#).unwrap();
+        assert_eq!(expr_tokens(&attrs.priority.unwrap()), "50 + 50");
+    }
+
+    #[test]
+    fn parses_retry_limit_from_arithmetic_expression() {
+        let attrs = parse_str(r#"#[zizq(retry_limit = 3 * 2)] struct Foo;"#).unwrap();
+        assert_eq!(expr_tokens(&attrs.retry_limit.unwrap()), "3 * 2");
     }
 
     #[test]
@@ -149,8 +308,8 @@ mod tests {
         .unwrap();
         assert_eq!(attrs.name.unwrap().value(), "n");
         assert_eq!(attrs.queue.unwrap().value(), "q");
-        assert_eq!(attrs.priority.unwrap().base10_parse::<u16>().unwrap(), 10);
-        assert_eq!(attrs.retry_limit.unwrap().base10_parse::<u32>().unwrap(), 3,);
+        assert_eq!(expr_tokens(&attrs.priority.unwrap()), "10");
+        assert_eq!(expr_tokens(&attrs.retry_limit.unwrap()), "3");
     }
 
     #[test]
@@ -168,24 +327,18 @@ mod tests {
     }
 
     #[test]
-    fn priority_at_upper_bound_is_accepted() {
+    fn priority_at_upper_bound_parses() {
+        // Range validation is deferred to Rust's const-eval on the
+        // generated code, so the parser just captures the expression.
         let attrs = parse_str(r#"#[zizq(priority = 65535)] struct Foo;"#).unwrap();
-        assert_eq!(
-            attrs.priority.unwrap().base10_parse::<u16>().unwrap(),
-            65535,
-        );
+        assert_eq!(expr_tokens(&attrs.priority.unwrap()), "65535");
     }
 
-    #[test]
-    fn priority_out_of_range_errors() {
-        let err = parse_str(r#"#[zizq(priority = 65536)] struct Foo;"#).unwrap_err();
-        let msg = err.to_string();
-        // syn's base10_parse produces "number too large to fit in target type"
-        assert!(
-            msg.contains("number too large") || msg.contains("out of range"),
-            "unexpected error: {msg}",
-        );
-    }
+    // Out-of-range integers like `priority = 65536` are no longer
+    // caught at derive time — they surface as a Rust const-eval error
+    // on the generated `Some(65536_u16)` (or similar). See
+    // `zizq/tests/derive_compile_fail_demo/` (added later) for the
+    // expected error UX.
 
     #[test]
     fn unknown_attribute_errors_with_helpful_message() {
@@ -232,5 +385,182 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attrs.name.unwrap().value(), "foo");
+    }
+
+    // --- backoff ---
+
+    #[test]
+    fn parses_full_backoff() {
+        let attrs = parse_str(
+            r#"#[zizq(backoff(base_ms = 1000, exponent = 2.0, jitter_ms = 500))] struct Foo;"#,
+        )
+        .unwrap();
+        let b = attrs.backoff.unwrap();
+        assert_eq!(expr_tokens(&b.base_ms), "1000");
+        assert_eq!(expr_tokens(&b.exponent), "2.0");
+        assert_eq!(expr_tokens(&b.jitter_ms), "500");
+    }
+
+    #[test]
+    fn parses_backoff_with_arithmetic_expressions() {
+        let attrs = parse_str(
+            r#"#[zizq(backoff(base_ms = 5 * 200, exponent = 1.5 + 0.5, jitter_ms = 100 * 5))] struct Foo;"#,
+        )
+        .unwrap();
+        let b = attrs.backoff.unwrap();
+        assert_eq!(expr_tokens(&b.base_ms), "5 * 200");
+        assert_eq!(expr_tokens(&b.exponent), "1.5 + 0.5");
+        assert_eq!(expr_tokens(&b.jitter_ms), "100 * 5");
+    }
+
+    #[test]
+    fn backoff_missing_field_errors() {
+        let err = parse_str(r#"#[zizq(backoff(base_ms = 1000, exponent = 2.0))] struct Foo;"#)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requires all of"), "unexpected error: {msg}");
+        assert!(msg.contains("jitter_ms"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn backoff_unknown_field_errors() {
+        let err = parse_str(
+            r#"#[zizq(backoff(base_ms = 1000, exponent = 2.0, jitter_ms = 500, foo = 1))] struct Foo;"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown `backoff` field"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("`foo`"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn backoff_duplicate_field_errors() {
+        let err = parse_str(
+            r#"#[zizq(backoff(base_ms = 1000, base_ms = 2000, exponent = 2.0, jitter_ms = 500))] struct Foo;"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `base_ms`"),
+            "unexpected error: {err}",
+        );
+    }
+
+    // The `exponent` field now accepts any expression, so `exponent = 2`
+    // parses at derive time. The generated `Some(BackoffConfig { exponent: 2, ... })`
+    // will fail at Rust's type-check ("expected `f32`, found integer")
+    // rather than at derive expansion — a small UX regression from the
+    // switch to `Expr`, offset by supporting arithmetic like
+    // `exponent = 1.5 + 0.5`.
+
+    #[test]
+    fn duplicate_backoff_attribute_errors() {
+        let err = parse_str(
+            r#"
+            #[zizq(backoff(base_ms = 1000, exponent = 2.0, jitter_ms = 500))]
+            #[zizq(backoff(base_ms = 2000, exponent = 3.0, jitter_ms = 100))]
+            struct Foo;
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `backoff`"),
+            "unexpected error: {err}",
+        );
+    }
+
+    // --- retention ---
+
+    #[test]
+    fn parses_retention_with_both_fields() {
+        let attrs = parse_str(
+            r#"#[zizq(retention(completed_ms = 60000, dead_ms = 86400000))] struct Foo;"#,
+        )
+        .unwrap();
+        let r = attrs.retention.unwrap();
+        assert_eq!(expr_tokens(&r.completed_ms.unwrap()), "60000");
+        assert_eq!(expr_tokens(&r.dead_ms.unwrap()), "86400000");
+    }
+
+    #[test]
+    fn parses_retention_with_arithmetic_expressions() {
+        // The main win of moving to `Expr`: readable duration math.
+        let attrs =
+            parse_str(r#"#[zizq(retention(dead_ms = 7 * 24 * 60 * 60 * 1000))] struct Foo;"#)
+                .unwrap();
+        let r = attrs.retention.unwrap();
+        assert!(r.completed_ms.is_none());
+        assert_eq!(expr_tokens(&r.dead_ms.unwrap()), "7 * 24 * 60 * 60 * 1000",);
+    }
+
+    #[test]
+    fn parses_retention_with_only_completed_ms() {
+        let attrs = parse_str(r#"#[zizq(retention(completed_ms = 60000))] struct Foo;"#).unwrap();
+        let r = attrs.retention.unwrap();
+        assert_eq!(expr_tokens(&r.completed_ms.unwrap()), "60000");
+        assert!(r.dead_ms.is_none());
+    }
+
+    #[test]
+    fn parses_retention_with_only_dead_ms() {
+        let attrs = parse_str(r#"#[zizq(retention(dead_ms = 86400000))] struct Foo;"#).unwrap();
+        let r = attrs.retention.unwrap();
+        assert!(r.completed_ms.is_none());
+        assert_eq!(expr_tokens(&r.dead_ms.unwrap()), "86400000");
+    }
+
+    #[test]
+    fn empty_retention_errors() {
+        // Two error paths reach the user: either syn rejects the empty
+        // parens up front ("unexpected end of input, expected nested
+        // attribute") or our own "requires at least one" check fires
+        // once the inner parse loop completes with nothing populated.
+        // Both point at the empty parens, so either is acceptable UX.
+        let err = parse_str(r#"#[zizq(retention())] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires at least one") || msg.contains("expected nested attribute"),
+            "unexpected error: {msg}",
+        );
+    }
+
+    #[test]
+    fn retention_unknown_field_errors() {
+        let err = parse_str(r#"#[zizq(retention(completed_ms = 60000, unknown = 1))] struct Foo;"#)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown `retention` field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn retention_duplicate_field_errors() {
+        let err =
+            parse_str(r#"#[zizq(retention(completed_ms = 1, completed_ms = 2))] struct Foo;"#)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `completed_ms`"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn duplicate_retention_attribute_errors() {
+        let err = parse_str(
+            r#"
+            #[zizq(retention(completed_ms = 1))]
+            #[zizq(retention(dead_ms = 2))]
+            struct Foo;
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `retention`"),
+            "unexpected error: {err}",
+        );
     }
 }

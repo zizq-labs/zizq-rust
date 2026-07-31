@@ -29,9 +29,13 @@ mod attrs;
 ///   (`u16`, range 0-65535).
 /// - `#[zizq(retry_limit = N)]` — overrides `JobKind::RETRY_LIMIT`
 ///   (`u32`).
+/// - `#[zizq(backoff(base_ms = ..., exponent = ..., jitter_ms = ...))]`
+///   — overrides `JobKind::BACKOFF`. All three fields are required.
+/// - `#[zizq(retention(completed_ms = ..., dead_ms = ...))]` —
+///   overrides `JobKind::RETENTION`. At least one inner field is
+///   required; the unspecified one falls through to the server default.
 ///
-/// Subsequent commits will add `backoff`, `retention`, `unique`,
-/// and `batch`.
+/// Subsequent commits will add `unique` and `batch`.
 #[proc_macro_derive(JobKind, attributes(zizq))]
 pub fn derive_job_kind(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -72,6 +76,39 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
     let retry_limit_const = attrs.retry_limit.as_ref().map(|lit| {
         quote! { const RETRY_LIMIT: ::core::option::Option<u32> = ::core::option::Option::Some(#lit); }
     });
+    let backoff_const = attrs.backoff.as_ref().map(|b| {
+        let base_ms = &b.base_ms;
+        let exponent = &b.exponent;
+        let jitter_ms = &b.jitter_ms;
+        quote! {
+            const BACKOFF: ::core::option::Option<::zizq::BackoffConfig> =
+                ::core::option::Option::Some(::zizq::BackoffConfig {
+                    base_ms: #base_ms,
+                    exponent: #exponent,
+                    jitter_ms: #jitter_ms,
+                });
+        }
+    });
+    let retention_const = attrs.retention.as_ref().map(|r| {
+        // Each inner field maps to `Some(lit)` or `None`, so the
+        // emitted struct literal is always a `RetentionConfig` with
+        // both fields explicit.
+        let completed_ms = match &r.completed_ms {
+            Some(lit) => quote! { ::core::option::Option::Some(#lit) },
+            None => quote! { ::core::option::Option::None },
+        };
+        let dead_ms = match &r.dead_ms {
+            Some(lit) => quote! { ::core::option::Option::Some(#lit) },
+            None => quote! { ::core::option::Option::None },
+        };
+        quote! {
+            const RETENTION: ::core::option::Option<::zizq::RetentionConfig> =
+                ::core::option::Option::Some(::zizq::RetentionConfig {
+                    completed_ms: #completed_ms,
+                    dead_ms: #dead_ms,
+                });
+        }
+    });
 
     Ok(quote! {
         impl #impl_generics ::zizq::JobKind for #ty #ty_generics #where_clause {
@@ -79,6 +116,8 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
             #queue_const
             #priority_const
             #retry_limit_const
+            #backoff_const
+            #retention_const
         }
     })
 }

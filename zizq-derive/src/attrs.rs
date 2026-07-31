@@ -9,7 +9,7 @@
 //! set it — that way the emitter can decide whether to emit an
 //! override or let the trait's default apply.
 
-use syn::{DeriveInput, Expr, LitStr};
+use syn::{DeriveInput, Expr, ExprArray, ExprLit, Lit, LitBool, LitStr};
 
 /// Container-level `#[zizq(...)]` attributes recognised on a
 /// `#[derive(JobKind)]` struct.
@@ -54,6 +54,58 @@ pub(crate) struct ZizqAttrs {
     /// individually but at least one must be present, otherwise the
     /// override is meaningless.
     pub retention: Option<RetentionAttr>,
+
+    /// `#[zizq(unique)]` / `#[zizq(unique(only = [...], except = [...],
+    /// scope = "...", prefix = false))]` — emits a
+    /// [`JobKind::unique_key`] implementation.
+    pub unique: Option<UniqueAttr>,
+}
+
+/// Parsed contents of `#[zizq(unique(...))]`. All fields are
+/// optional; a bare `#[zizq(unique)]` produces `UniqueAttr::default()`
+/// which hashes the entire payload with the type name as tag prefix.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Default)]
+pub(crate) struct UniqueAttr {
+    /// Path-set narrowing the payload before hashing. `Only` and
+    /// `Except` are mutually exclusive.
+    pub selection: Option<UniqueSelection>,
+
+    /// `scope = "queued" | "active" | "exists"`. When `None`, the
+    /// server's default (`Queued`) applies.
+    pub scope: Option<UniqueScopeAttr>,
+
+    /// `prefix = true | false`. When `None`, treated as `true` — the
+    /// type name is used as the hash's tag prefix
+    /// ([`UniqueKey::tagged_hash_of`]). `false` switches to the
+    /// unprefixed form ([`UniqueKey::hash_of`]).
+    ///
+    /// [`UniqueKey::tagged_hash_of`]: zizq::UniqueKey::tagged_hash_of
+    /// [`UniqueKey::hash_of`]: zizq::UniqueKey::hash_of
+    pub prefix: Option<LitBool>,
+}
+
+/// Payload subsetting for [`UniqueAttr::selection`]. Only one variant
+/// applies per attribute — the parser rejects the combination.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum UniqueSelection {
+    /// `only = [".foo", ".bar"]` — hash only these sub-paths.
+    Only(Vec<LitStr>),
+
+    /// `except = [".foo", ".bar"]` — hash the payload minus these
+    /// sub-paths.
+    Except(Vec<LitStr>),
+}
+
+/// One of the three [`UniqueScope`] variants selectable by string in
+/// `#[zizq(unique(scope = "..."))]`.
+///
+/// [`UniqueScope`]: zizq::UniqueScope
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(crate) enum UniqueScopeAttr {
+    Queued,
+    Active,
+    Exists,
 }
 
 /// Parsed contents of `#[zizq(backoff(...))]`. Every field is populated
@@ -130,6 +182,19 @@ impl ZizqAttrs {
                             return Err(meta.error("duplicate `retention` attribute"));
                         }
                         attrs.retention = Some(parse_retention(&meta)?);
+                    }
+                    "unique" => {
+                        if attrs.unique.is_some() {
+                            return Err(meta.error("duplicate `unique` attribute"));
+                        }
+                        // `unique` may be bare (Meta::Path) or take a
+                        // parenthesised body (Meta::List). Peek for the
+                        // opening paren to decide which shape to parse.
+                        if meta.input.peek(syn::token::Paren) {
+                            attrs.unique = Some(parse_unique(&meta)?);
+                        } else {
+                            attrs.unique = Some(UniqueAttr::default());
+                        }
                     }
                     other => {
                         return Err(meta.error(format!("unknown `zizq` attribute `{other}`")));
@@ -232,6 +297,101 @@ fn parse_retention(meta: &syn::meta::ParseNestedMeta) -> syn::Result<RetentionAt
         completed_ms,
         dead_ms,
     })
+}
+
+/// Parse the `(only = [...], except = [...], scope = "...", prefix = ...)`
+/// body of a `#[zizq(unique(...))]` attribute.
+///
+/// `only` and `except` are mutually exclusive — setting both is a
+/// compile error. `scope` accepts one of the three string variants
+/// mapped to [`UniqueScopeAttr`]. `prefix` is a bare bool literal.
+fn parse_unique(meta: &syn::meta::ParseNestedMeta) -> syn::Result<UniqueAttr> {
+    let mut only: Option<Vec<LitStr>> = None;
+    let mut except: Option<Vec<LitStr>> = None;
+    let mut scope: Option<UniqueScopeAttr> = None;
+    let mut prefix: Option<LitBool> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "only" => {
+                if only.is_some() {
+                    return Err(inner.error("duplicate `only` field"));
+                }
+                only = Some(parse_str_array(&inner)?);
+            }
+            "except" => {
+                if except.is_some() {
+                    return Err(inner.error("duplicate `except` field"));
+                }
+                except = Some(parse_str_array(&inner)?);
+            }
+            "scope" => {
+                if scope.is_some() {
+                    return Err(inner.error("duplicate `scope` field"));
+                }
+                let lit: LitStr = inner.value()?.parse()?;
+                scope = Some(match lit.value().as_str() {
+                    "queued" => UniqueScopeAttr::Queued,
+                    "active" => UniqueScopeAttr::Active,
+                    "exists" => UniqueScopeAttr::Exists,
+                    other => {
+                        return Err(syn::Error::new_spanned(
+                            &lit,
+                            format!(
+                                "unknown scope `{other}` — expected `queued`, `active`, or `exists`",
+                            ),
+                        ));
+                    }
+                });
+            }
+            "prefix" => {
+                if prefix.is_some() {
+                    return Err(inner.error("duplicate `prefix` field"));
+                }
+                prefix = Some(inner.value()?.parse::<LitBool>()?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `unique` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    let selection = match (only, except) {
+        (Some(_), Some(_)) => {
+            return Err(meta.error("`only` and `except` are mutually exclusive on `unique(...)`"));
+        }
+        (Some(paths), None) => Some(UniqueSelection::Only(paths)),
+        (None, Some(paths)) => Some(UniqueSelection::Except(paths)),
+        (None, None) => None,
+    };
+
+    Ok(UniqueAttr {
+        selection,
+        scope,
+        prefix,
+    })
+}
+
+/// Parse a bracketed array of string literals (`["a", "b", ...]`)
+/// out of `inner.value()`. Each element must be a plain `LitStr` —
+/// bare identifiers, integers, or other expressions error with a
+/// span on the offending element.
+fn parse_str_array(inner: &syn::meta::ParseNestedMeta) -> syn::Result<Vec<LitStr>> {
+    let arr: ExprArray = inner.value()?.parse()?;
+    arr.elems
+        .into_iter()
+        .map(|elem| match elem {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) => Ok(s),
+            other => Err(syn::Error::new_spanned(
+                &other,
+                "expected a string literal (e.g. `\".foo\"`)",
+            )),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -560,6 +720,129 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string().contains("duplicate `retention`"),
+            "unexpected error: {err}",
+        );
+    }
+
+    // --- unique ---
+
+    #[test]
+    fn bare_unique_parses_with_defaults() {
+        let attrs = parse_str(r#"#[zizq(unique)] struct Foo;"#).unwrap();
+        let u = attrs.unique.unwrap();
+        assert!(u.selection.is_none());
+        assert!(u.scope.is_none());
+        assert!(u.prefix.is_none());
+    }
+
+    #[test]
+    fn parses_unique_only() {
+        let attrs =
+            parse_str(r#"#[zizq(unique(only = [".user_id", ".campaign_id"]))] struct Foo;"#)
+                .unwrap();
+        let u = attrs.unique.unwrap();
+        let paths = match u.selection {
+            Some(UniqueSelection::Only(p)) => p,
+            other => panic!("expected Only, got {other:?}"),
+        };
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].value(), ".user_id");
+        assert_eq!(paths[1].value(), ".campaign_id");
+    }
+
+    #[test]
+    fn parses_unique_except() {
+        let attrs = parse_str(r#"#[zizq(unique(except = [".body"]))] struct Foo;"#).unwrap();
+        let u = attrs.unique.unwrap();
+        let paths = match u.selection {
+            Some(UniqueSelection::Except(p)) => p,
+            other => panic!("expected Except, got {other:?}"),
+        };
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].value(), ".body");
+    }
+
+    #[test]
+    fn only_and_except_together_error() {
+        let err = parse_str(r#"#[zizq(unique(only = [".a"], except = [".b"]))] struct Foo;"#)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn parses_unique_scope() {
+        let attrs = parse_str(r#"#[zizq(unique(scope = "active"))] struct Foo;"#).unwrap();
+        let u = attrs.unique.unwrap();
+        assert_eq!(u.scope, Some(UniqueScopeAttr::Active));
+    }
+
+    #[test]
+    fn parses_unique_scope_queued_and_exists() {
+        let q = parse_str(r#"#[zizq(unique(scope = "queued"))] struct Foo;"#).unwrap();
+        assert_eq!(q.unique.unwrap().scope, Some(UniqueScopeAttr::Queued));
+        let e = parse_str(r#"#[zizq(unique(scope = "exists"))] struct Foo;"#).unwrap();
+        assert_eq!(e.unique.unwrap().scope, Some(UniqueScopeAttr::Exists));
+    }
+
+    #[test]
+    fn unknown_scope_errors() {
+        let err = parse_str(r#"#[zizq(unique(scope = "bogus"))] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown scope"), "unexpected error: {msg}");
+        assert!(msg.contains("`bogus`"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn parses_unique_prefix_false() {
+        let attrs = parse_str(r#"#[zizq(unique(prefix = false))] struct Foo;"#).unwrap();
+        let u = attrs.unique.unwrap();
+        assert_eq!(u.prefix.unwrap().value, false);
+    }
+
+    #[test]
+    fn parses_unique_all_options_combined() {
+        let attrs = parse_str(
+            r#"#[zizq(unique(only = [".x", ".y"], scope = "active", prefix = false))] struct Foo;"#,
+        )
+        .unwrap();
+        let u = attrs.unique.unwrap();
+        assert!(matches!(u.selection, Some(UniqueSelection::Only(_))));
+        assert_eq!(u.scope, Some(UniqueScopeAttr::Active));
+        assert_eq!(u.prefix.unwrap().value, false);
+    }
+
+    #[test]
+    fn unknown_unique_field_errors() {
+        let err = parse_str(r#"#[zizq(unique(bogus = true))] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown `unique` field"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_string_element_in_only_errors() {
+        let err = parse_str(r#"#[zizq(unique(only = [42]))] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("string literal"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn duplicate_unique_attribute_errors() {
+        let err = parse_str(
+            r#"
+            #[zizq(unique)]
+            #[zizq(unique(scope = "active"))]
+            struct Foo;
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `unique`"),
             "unexpected error: {err}",
         );
     }

@@ -11,7 +11,7 @@
 #![cfg(feature = "derive")]
 
 use serde::{Deserialize, Serialize};
-use zizq::{BackoffConfig, JobKind, RetentionConfig};
+use zizq::{BackoffConfig, JobKind, RetentionConfig, UniqueKey, UniqueScope};
 
 #[test]
 fn defaults_come_from_the_trait_when_no_attrs_are_set() {
@@ -175,4 +175,123 @@ fn stacked_zizq_attributes_are_merged() {
     assert_eq!(SendEmail::NAME, "send.email");
     assert_eq!(SendEmail::QUEUE, "emails");
     assert_eq!(SendEmail::PRIORITY, Some(50));
+}
+
+// --- unique ---
+
+#[test]
+fn bare_unique_hashes_whole_payload_with_type_tag() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(unique)]
+    struct SendEmail {
+        to: String,
+        subject: String,
+    }
+    let job = SendEmail {
+        to: "alice@example.com".into(),
+        subject: "hi".into(),
+    };
+    let derived = job.unique_key().expect("unique_key returned Some");
+    // Compare against a hand-rolled tagged_hash_of on the whole payload.
+    let expected = UniqueKey::tagged_hash_of(SendEmail::NAME, &job);
+    assert_eq!(derived.key, expected.key);
+    // No scope was set — the trait's default (`Queued`) applies via `None`.
+    assert!(derived.scope.is_none());
+}
+
+#[test]
+fn unique_with_scope_carries_scope_through() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(unique(scope = "active"))]
+    struct SendEmail {
+        to: String,
+    }
+    let key = SendEmail { to: "a@b".into() }.unique_key().unwrap();
+    assert_eq!(key.scope, Some(UniqueScope::Active));
+}
+
+#[test]
+fn unique_only_hashes_a_subset_of_fields() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(unique(only = [".user_id"]))]
+    struct SendEmail {
+        user_id: u64,
+        body: String,
+    }
+    // Two jobs with the same `user_id` but different `body` should
+    // produce the same key.
+    let a = SendEmail {
+        user_id: 42,
+        body: "hello".into(),
+    };
+    let b = SendEmail {
+        user_id: 42,
+        body: "goodbye".into(),
+    };
+    assert_eq!(a.unique_key().unwrap().key, b.unique_key().unwrap().key);
+    // A different `user_id` gives a different key.
+    let c = SendEmail {
+        user_id: 99,
+        body: "hello".into(),
+    };
+    assert_ne!(a.unique_key().unwrap().key, c.unique_key().unwrap().key);
+}
+
+#[test]
+fn unique_except_hashes_everything_but_named_fields() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(unique(except = [".body"]))]
+    struct SendEmail {
+        user_id: u64,
+        body: String,
+    }
+    // Two jobs differing only in `body` (which is excluded) collide.
+    let a = SendEmail {
+        user_id: 42,
+        body: "x".into(),
+    };
+    let b = SendEmail {
+        user_id: 42,
+        body: "y".into(),
+    };
+    assert_eq!(a.unique_key().unwrap().key, b.unique_key().unwrap().key);
+}
+
+#[test]
+fn unique_prefix_false_drops_the_type_name_tag() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(unique(prefix = false))]
+    struct SendEmail {
+        to: String,
+    }
+    let job = SendEmail { to: "a@b".into() };
+    let derived = job.unique_key().unwrap();
+    // With prefix off, the emitted call is UniqueKey::hash_of(&self)
+    // — verify by comparing against a hand-rolled call.
+    let expected = UniqueKey::hash_of(&job);
+    assert_eq!(derived.key, expected.key);
+    // And critically: it's NOT the tagged form.
+    let tagged = UniqueKey::tagged_hash_of(SendEmail::NAME, &job);
+    assert_ne!(derived.key, tagged.key);
+}
+
+#[test]
+fn unique_composes_only_scope_and_prefix() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(unique(only = [".platform"], scope = "exists", prefix = false))]
+    struct Push {
+        device_ids: Vec<String>,
+        platform: String,
+    }
+    let job = Push {
+        device_ids: vec!["a".into(), "b".into()],
+        platform: "apple".into(),
+    };
+    let key = job.unique_key().unwrap();
+    assert_eq!(key.scope, Some(UniqueScope::Exists));
+    // Hash must equal `hash_of(payload_only(&job, [".platform"]))`
+    // which — because only the platform is in the picked subset —
+    // is the hash of `{"platform": "apple"}`.
+    let expected = UniqueKey::hash_of(&serde_json::json!({ "platform": "apple" }));
+    assert_eq!(key.key, expected.key);
 }

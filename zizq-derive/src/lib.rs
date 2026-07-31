@@ -12,10 +12,14 @@
 //! [`zizq`]: https://docs.rs/zizq
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
+use crate::attrs::{UniqueAttr, UniqueScopeAttr, UniqueSelection};
+
 mod attrs;
+mod jq_path;
 
 /// Derive an implementation of `zizq::JobKind` for the annotated
 /// struct.
@@ -34,8 +38,14 @@ mod attrs;
 /// - `#[zizq(retention(completed_ms = ..., dead_ms = ...))]` —
 ///   overrides `JobKind::RETENTION`. At least one inner field is
 ///   required; the unspecified one falls through to the server default.
+/// - `#[zizq(unique)]` — hash the whole payload as the uniqueness
+///   key, with the type name as tag prefix. May take a
+///   `unique(only = [...], except = [...], scope = "...", prefix = ...)`
+///   body: `only`/`except` narrow the hashed subset (mutually
+///   exclusive), `scope` selects one of `"queued"` / `"active"` /
+///   `"exists"`, `prefix = false` drops the type-name tag.
 ///
-/// Subsequent commits will add `unique` and `batch`.
+/// The next commit adds `batch`.
 #[proc_macro_derive(JobKind, attributes(zizq))]
 pub fn derive_job_kind(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -89,6 +99,7 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
                 });
         }
     });
+    let unique_key_fn = attrs.unique.as_ref().map(emit_unique_key).transpose()?;
     let retention_const = attrs.retention.as_ref().map(|r| {
         // Each inner field maps to `Some(lit)` or `None`, so the
         // emitted struct literal is always a `RetentionConfig` with
@@ -118,6 +129,124 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
             #retry_limit_const
             #backoff_const
             #retention_const
+            #unique_key_fn
         }
     })
+}
+
+/// Emit the `fn unique_key(&self) -> Option<UniqueKey>` body from a
+/// parsed [`UniqueAttr`].
+///
+/// The flow branches on two axes:
+///
+/// 1. **Selection** — bare / `only` / `except`. Bare hashes `&self`
+///    directly; `only`/`except` transform through `payload_only` /
+///    `payload_except` and hash the resulting subset.
+/// 2. **Prefix** — the emitted call is either
+///    `UniqueKey::tagged_hash_of(Self::NAME, ...)` (default) or
+///    `UniqueKey::hash_of(...)` when `prefix = false`.
+///
+/// The scope, if set, chains a `.scope(UniqueScope::...)` on the
+/// resulting [`UniqueKey`].
+///
+/// For `only`/`except`, every path string is parsed at derive
+/// expansion by [`jq_path::parse`] and emitted as a pre-built
+/// `Vec<PathStep>` constructor. Invalid paths become
+/// span-attached compile errors, and the emitted code contains no
+/// runtime parse call — so there's no "panic on first
+/// unique_key() call, six hours after startup" failure mode.
+fn emit_unique_key(unique: &UniqueAttr) -> syn::Result<TokenStream2> {
+    let prefix_on = unique.prefix.as_ref().map_or(true, |b| b.value);
+
+    // Build the "hashable" expression — either `self` directly (bare)
+    // or the result of subsetting via a runtime helper.
+    let hashable: TokenStream2 = match &unique.selection {
+        None => quote! { self },
+        Some(UniqueSelection::Only(paths)) => {
+            let paths_static = emit_paths_static(paths)?;
+            quote! {
+                {
+                    #paths_static
+                    &::zizq::__internal::payload_only(self, &PATHS)
+                }
+            }
+        }
+        Some(UniqueSelection::Except(paths)) => {
+            let paths_static = emit_paths_static(paths)?;
+            quote! {
+                {
+                    #paths_static
+                    &::zizq::__internal::payload_except(self, &PATHS)
+                }
+            }
+        }
+    };
+
+    // Build the hash call — with or without the type-name tag prefix.
+    let hash_call = if prefix_on {
+        quote! { ::zizq::UniqueKey::tagged_hash_of(<Self as ::zizq::JobKind>::NAME, #hashable) }
+    } else {
+        quote! { ::zizq::UniqueKey::hash_of(#hashable) }
+    };
+
+    // Optionally chain a scope.
+    let scoped = match &unique.scope {
+        Some(scope) => {
+            let variant = match scope {
+                UniqueScopeAttr::Queued => quote! { Queued },
+                UniqueScopeAttr::Active => quote! { Active },
+                UniqueScopeAttr::Exists => quote! { Exists },
+            };
+            quote! { #hash_call.scope(::zizq::UniqueScope::#variant) }
+        }
+        None => hash_call,
+    };
+
+    Ok(quote! {
+        fn unique_key(&self) -> ::core::option::Option<::zizq::UniqueKey> {
+            ::core::option::Option::Some(#scoped)
+        }
+    })
+}
+
+/// Emit a `static PATHS: LazyLock<Vec<Vec<PathStep>>>` initializer
+/// whose closure returns each path as a pre-built `Vec<PathStep>`.
+/// The paths are parsed at derive expansion — malformed inputs
+/// return a `syn::Error` with a span on the offending string
+/// literal, surfaced as a compile error via `to_compile_error()`.
+///
+/// The `LazyLock` is still used because heap allocation for the
+/// outer `Vec<Vec<PathStep>>` happens on first access rather than on
+/// every call. Since the derive owns every path string, the
+/// initializer body is closure code that produces the vec directly —
+/// no runtime parsing.
+fn emit_paths_static(paths: &[syn::LitStr]) -> syn::Result<TokenStream2> {
+    let vec_ctors = paths
+        .iter()
+        .map(|lit| {
+            let parsed = jq_path::parse(&lit.value()).map_err(|e| {
+                syn::Error::new_spanned(lit, format!("invalid jq path {:?}: {e}", lit.value()))
+            })?;
+            Ok(emit_path_steps_vec(&parsed))
+        })
+        .collect::<syn::Result<Vec<TokenStream2>>>()?;
+
+    Ok(quote! {
+        static PATHS: ::std::sync::LazyLock<::std::vec::Vec<::std::vec::Vec<::zizq::__internal::PathStep>>> =
+            ::std::sync::LazyLock::new(|| ::std::vec![#(#vec_ctors),*]);
+    })
+}
+
+/// Emit a `vec![PathStep::Field(...), PathStep::Index(...), ...]`
+/// literal for one parsed path.
+fn emit_path_steps_vec(steps: &[jq_path::PathStep]) -> TokenStream2 {
+    let step_ctors = steps.iter().map(|step| match step {
+        jq_path::PathStep::Field(name) => quote! {
+            ::zizq::__internal::PathStep::Field(::std::string::String::from(#name))
+        },
+        jq_path::PathStep::Index(idx) => quote! {
+            ::zizq::__internal::PathStep::Index(#idx)
+        },
+    });
+    quote! { ::std::vec![#(#step_ctors),*] }
 }

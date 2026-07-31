@@ -169,3 +169,19 @@ pub use unique_key::{UniqueKey, UniqueScope};
 pub use worker::{HandlerError, JobHandler, Worker, WorkerBuilder};
 #[cfg(feature = "derive")]
 pub use zizq_derive::JobKind;
+
+// Runtime helpers the derive-emitted code calls into. Public in the
+// Rust visibility sense so derives on downstream types can reach them,
+// hidden from the rendered docs because they aren't part of the API
+// users write against by hand. Do not depend on the contents of this
+// module directly — treat it as an implementation detail of
+// `#[derive(JobKind)]`.
+//
+// The derive parses every jq path at expansion time using its own
+// (duplicated) parser, so no `parse_path` is exposed here — emitted
+// code constructs `PathStep` values directly.
+#[doc(hidden)]
+pub mod __internal {
+    pub use crate::hashable::{payload_except, payload_only};
+    pub use crate::jq_path::PathStep;
+}

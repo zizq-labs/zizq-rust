@@ -35,7 +35,7 @@ use crate::jq_path::{self, PathStep};
 /// syntax uses serialised field names, so `#[serde(rename = "x")]`
 /// and container-level `rename_all` are honoured automatically —
 /// the payload has already been rendered by the time we look at it.
-pub(crate) fn payload_except(payload: &impl Serialize, paths: &[Vec<PathStep>]) -> Value {
+pub fn payload_except(payload: &impl Serialize, paths: &[Vec<PathStep>]) -> Value {
     let mut value =
         serde_json::to_value(payload).expect("payload should serialize to serde_json::Value");
     for path in paths {
@@ -55,7 +55,7 @@ pub(crate) fn payload_except(payload: &impl Serialize, paths: &[Vec<PathStep>]) 
 ///
 /// The serialise-first model gives free `#[serde(rename = ...)]`
 /// interop for the same reason [`payload_except`] does.
-pub(crate) fn payload_only(payload: &impl Serialize, paths: &[Vec<PathStep>]) -> Value {
+pub fn payload_only(payload: &impl Serialize, paths: &[Vec<PathStep>]) -> Value {
     let value =
         serde_json::to_value(payload).expect("payload should serialize to serde_json::Value");
     jq_path::pick(&value, paths)
@@ -64,7 +64,6 @@ pub(crate) fn payload_only(payload: &impl Serialize, paths: &[Vec<PathStep>]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jq_path;
     use crate::unique_key::UniqueKey;
     use serde::Serialize;
     use serde_json::json;
@@ -76,8 +75,16 @@ mod tests {
         tenant_id: u64,
     }
 
-    fn parse_paths(paths: &[&str]) -> Vec<Vec<PathStep>> {
-        paths.iter().map(|p| jq_path::parse(p).unwrap()).collect()
+    // Local helpers for readable inline path construction. The
+    // runtime parser lives in `zizq-derive` and only runs at derive
+    // expansion, so tests here build `PathStep` values directly.
+
+    fn field(name: &str) -> PathStep {
+        PathStep::Field(name.into())
+    }
+
+    fn paths<const N: usize>(paths: [Vec<PathStep>; N]) -> Vec<Vec<PathStep>> {
+        paths.into_iter().collect()
     }
 
     // --- payload_except ---
@@ -107,7 +114,7 @@ mod tests {
             tenant_id: 42,
         };
         assert_eq!(
-            payload_except(&p, &parse_paths(&[".device_ids"])),
+            payload_except(&p, &paths([vec![field("device_ids")]])),
             json!({ "platform": "apple", "tenant_id": 42 }),
         );
     }
@@ -120,7 +127,10 @@ mod tests {
             tenant_id: 42,
         };
         assert_eq!(
-            payload_except(&p, &parse_paths(&[".device_ids", ".tenant_id"])),
+            payload_except(
+                &p,
+                &paths([vec![field("device_ids")], vec![field("tenant_id")]])
+            ),
             json!({ "platform": "apple" }),
         );
     }
@@ -132,7 +142,8 @@ mod tests {
             platform: "apple".into(),
             tenant_id: 42,
         };
-        assert_eq!(payload_except(&p, &parse_paths(&["."])), Value::Null);
+        // Root path (empty step list) — the "whole payload" exclusion.
+        assert_eq!(payload_except(&p, &paths([Vec::new()])), Value::Null);
     }
 
     #[test]
@@ -143,7 +154,10 @@ mod tests {
             tenant_id: 42,
         };
         assert_eq!(
-            payload_except(&p, &parse_paths(&[".not_there", ".device_ids"])),
+            payload_except(
+                &p,
+                &paths([vec![field("not_there")], vec![field("device_ids")]])
+            ),
             json!({ "platform": "apple", "tenant_id": 42 }),
         );
     }
@@ -168,7 +182,7 @@ mod tests {
             tenant_id: 42,
         };
         assert_eq!(
-            payload_only(&p, &parse_paths(&[".platform"])),
+            payload_only(&p, &paths([vec![field("platform")]])),
             json!({ "platform": "apple" }),
         );
     }
@@ -181,7 +195,10 @@ mod tests {
             tenant_id: 42,
         };
         assert_eq!(
-            payload_only(&p, &parse_paths(&[".platform", ".tenant_id"])),
+            payload_only(
+                &p,
+                &paths([vec![field("platform")], vec![field("tenant_id")]])
+            ),
             json!({ "platform": "apple", "tenant_id": 42 }),
         );
     }
@@ -193,8 +210,9 @@ mod tests {
             platform: "apple".into(),
             tenant_id: 42,
         };
+        // Root path (empty step list) — the "whole payload" pick.
         assert_eq!(
-            payload_only(&p, &parse_paths(&["."])),
+            payload_only(&p, &paths([Vec::new()])),
             json!({
                 "device_ids": ["a"],
                 "platform": "apple",
@@ -223,7 +241,7 @@ mod tests {
             note: "irrelevant".into(),
         };
         assert_eq!(
-            payload_only(&n, &parse_paths(&[".user.id"])),
+            payload_only(&n, &paths([vec![field("user"), field("id")]])),
             json!({ "user": { "id": 42 } }),
         );
     }
@@ -236,7 +254,10 @@ mod tests {
             tenant_id: 42,
         };
         assert_eq!(
-            payload_only(&p, &parse_paths(&[".not_there", ".platform"])),
+            payload_only(
+                &p,
+                &paths([vec![field("not_there")], vec![field("platform")]])
+            ),
             json!({ "platform": "apple" }),
         );
     }
@@ -262,8 +283,10 @@ mod tests {
         };
         // Excluding the batch path yields the same hashable → same key
         // — this is the property the batch-key derivation relies on.
-        let key_a = UniqueKey::hash_of(&payload_except(&a, &parse_paths(&[".device_ids"]))).key;
-        let key_b = UniqueKey::hash_of(&payload_except(&b, &parse_paths(&[".device_ids"]))).key;
+        let key_a =
+            UniqueKey::hash_of(&payload_except(&a, &paths([vec![field("device_ids")]]))).key;
+        let key_b =
+            UniqueKey::hash_of(&payload_except(&b, &paths([vec![field("device_ids")]]))).key;
         assert_eq!(key_a, key_b);
     }
 
@@ -280,9 +303,12 @@ mod tests {
             tenant_id: 42,
         };
         let key_apple =
-            UniqueKey::hash_of(&payload_except(&apple, &parse_paths(&[".device_ids"]))).key;
-        let key_android =
-            UniqueKey::hash_of(&payload_except(&android, &parse_paths(&[".device_ids"]))).key;
+            UniqueKey::hash_of(&payload_except(&apple, &paths([vec![field("device_ids")]]))).key;
+        let key_android = UniqueKey::hash_of(&payload_except(
+            &android,
+            &paths([vec![field("device_ids")]]),
+        ))
+        .key;
         assert_ne!(key_apple, key_android);
     }
 }

@@ -123,6 +123,7 @@ mod job;
 mod job_filter;
 mod job_patch;
 mod jq_expr;
+mod jq_path;
 mod list_errors;
 mod list_jobs;
 mod patch_jobs;

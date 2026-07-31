@@ -23,3 +23,10 @@ proc-macro = true
 syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+
+[dev-dependencies]
+# `extra-traits` unlocks `Debug` / `Eq` / `PartialEq` / `Hash` on
+# every `syn` node, which unit tests rely on for readable failures
+# and `.unwrap_err()`. Confined to dev-deps so the shipped proc-macro
+# pays no extra compile cost.
+syn = { version = "3", features = ["full", "extra-traits"] }

@@ -14,14 +14,30 @@ categories = ["asynchronous", "api-bindings"]
 exclude = ["examples/"]
 
 [features]
-default = ["rustls-tls"]
-# TLS backends — enable exactly one. `rustls-tls` (default) is pure
-# Rust with no system OpenSSL dependency; `native-tls` uses the
-# platform TLS library.
+
+## Default: pure-Rust TLS (`rustls-tls`) plus the `#[derive(JobKind)]`
+## macro (`derive`).
+default = ["rustls-tls", "derive"]
+
+## Pure-Rust TLS via `rustls`. No system OpenSSL dependency. Enable
+## exactly one of `rustls-tls` or `native-tls`.
 rustls-tls = ["reqwest/rustls-tls"]
+
+## System TLS via the platform's native library (OpenSSL on Linux,
+## SChannel on Windows, Secure Transport on macOS). Enable this
+## instead of `rustls-tls` when you need to inherit the OS's
+## certificate store or PKI configuration.
 native-tls = ["reqwest/native-tls"]
 
+## `#[derive(JobKind)]` — a proc-macro that generates the trait
+## implementation from `#[zizq(...)]` attributes on your payload
+## struct. Disable if you prefer to write the `impl JobKind` block by
+## hand and skip the proc-macro compile-time cost.
+derive = ["dep:zizq-derive"]
+
 [dependencies]
+zizq-derive = { workspace = true, optional = true }
+document-features = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

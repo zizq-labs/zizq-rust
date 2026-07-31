@@ -9,11 +9,13 @@ set -euo pipefail
 #
 # The workspace uses `[workspace.package] version = "..."` and each
 # member inherits via `version.workspace = true`, so a single edit
-# bumps every crate.
+# in Cargo.toml bumps every crate. The inter-crate pin in
+# `[workspace.dependencies]` (e.g. `zizq-derive = { version = "=X.Y.Z" }`)
+# is bumped alongside so the version-locked sibling still resolves.
 #
 # Updates:
-#   - Cargo.toml (workspace-level version)
-#   - Cargo.lock (via cargo update)
+#   - Cargo.toml (workspace-level version + inter-crate `=X.Y.Z` pins)
+#   - Cargo.lock (via cargo update for each workspace member)
 #   - zizq/CHANGELOG.md (adds a new section header for the new version)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -47,8 +49,17 @@ echo "Bumping version: ${CURRENT} -> ${NEW}"
 sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW}\"/" Cargo.toml
 echo "  Updated Cargo.toml (workspace)"
 
-# Update Cargo.lock. If cargo update fails, regenerate the lockfile.
-cargo update -p zizq --quiet 2>/dev/null || cargo generate-lockfile --quiet 2>/dev/null || true
+# Update the inter-crate pinned dep in [workspace.dependencies].
+# The `=X.Y.Z` prefix is unique to pinned deps so `g` is safe.
+sed -i "s/version = \"=${CURRENT}\"/version = \"=${NEW}\"/g" Cargo.toml
+echo "  Updated Cargo.toml (workspace.dependencies pins)"
+
+# Update Cargo.lock for both workspace members. If cargo update
+# fails (e.g. a stale lockfile from a previous mishap), regenerate
+# it from scratch.
+cargo update -p zizq -p zizq-derive --quiet 2>/dev/null \
+    || cargo generate-lockfile --quiet 2>/dev/null \
+    || true
 echo "  Updated Cargo.lock"
 
 # Add new CHANGELOG section if it doesn't already exist.

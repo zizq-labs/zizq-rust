@@ -1,0 +1,25 @@
+[package]
+name = "zizq-derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Proc-macro companion for the zizq crate — `#[derive(JobKind)]`."
+documentation = "https://docs.rs/zizq"
+readme = "README.md"
+keywords = ["job-queue", "zizq", "derive", "proc-macro"]
+categories = ["asynchronous", "api-bindings"]
+
+# Marks this as a proc-macro crate. It is loaded into rustc at
+# compile time and can only export `#[proc_macro_derive]`,
+# `#[proc_macro_attribute]`, and `#[proc_macro]` items — no regular
+# functions, types, or traits alongside.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

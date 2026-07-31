@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["zizq"]
+members = ["zizq", "zizq-derive"]
 
 # Fields inherited by workspace members via `field.workspace = true`
 # in their own `[package]` section. Bumping the version here bumps
@@ -13,6 +13,9 @@ license = "MIT"
 repository = "https://github.com/zizq-labs/zizq-rust"
 homepage = "https://zizq.io"
 
-# Reserved for future use — the `zizq` crate will pin `zizq-derive`
-# to an exact version here once the proc-macro sibling lands.
+# The `zizq` crate pins `zizq-derive` to an exact version — see
+# `[dependencies]` in `zizq/Cargo.toml`. Version and path resolve
+# through the workspace here so bump-version.sh only needs to touch
+# `[workspace.package]` above.
 [workspace.dependencies]
+zizq-derive = { version = "=0.6.0", path = "zizq-derive" }

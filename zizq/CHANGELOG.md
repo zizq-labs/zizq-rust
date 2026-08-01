@@ -4,6 +4,43 @@
 
 ### Added
 
+- **`#[derive(JobKind)]`** — a proc-macro that generates the
+  `JobKind` impl from declarative `#[zizq(...)]` attributes on the
+  payload struct, replacing the manual `impl JobKind for MyJob { ... }`
+  block for the common cases. Lives in a companion `zizq-derive`
+  crate and is re-exported from `zizq` behind the `derive` feature
+  (enabled by default; opt out with `default-features = false` if
+  you want to skip the proc-macro compile-time cost).
+
+  Every associated const has an attribute — `name`, `queue`,
+  `priority`, `retry_limit`, `backoff(...)`, `retention(...)` —
+  plus attributes for `unique(...)` (generating `fn unique_key`) and
+  `batch(...)` (generating `fn batch`). Numeric fields accept
+  const-evaluable expressions, so
+  `retention(dead_ms = 7 * 24 * 60 * 60 * 1000)` works. Path
+  arguments (jq-compatible dotted paths) are validated at derive
+  expansion time — malformed paths surface as compile errors with a
+  caret on the offending literal, not runtime panics.
+
+      use zizq::JobKind;
+
+      #[derive(serde::Serialize, serde::Deserialize, JobKind)]
+      #[zizq(
+          name = "send_email",
+          queue = "emails",
+          priority = 100,
+          retry_limit = 3,
+          unique(only = [".user_id"], scope = "active"),
+      )]
+      struct SendEmail {
+          user_id: u64,
+          body: String,
+      }
+
+  Manual `impl JobKind` still works for cases that don't fit the
+  attribute grammar — dynamic keys, computed defaults, or generic
+  jobs. The derive is the recommended path for the 90% case.
+
 - **Batched jobs** — a new server-side folding mechanism, gated behind
   a Zizq Pro license on the server. Successive enqueues that share a
   batch key are folded into a single pending job via configurable jq

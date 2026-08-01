@@ -19,9 +19,9 @@ use to enqueue that job directly:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, CronEntry, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "cleanup")]
 > # struct Cleanup { older_than_days: u32 }
-> # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
 > # fn build(client: &Client) -> CronEntry {
 > CronEntry::new(
 >     "nightly-cleanup",                              // entry name
@@ -48,12 +48,12 @@ use to enqueue that job directly:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, CronEntry, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "cleanup")]
 > # struct Cleanup;
-> # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "digest")]
 > # struct Digest;
-> # impl JobKind for Digest { const NAME: &'static str = "digest"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let group = client
 >     .replace_cron("maintenance")
@@ -78,9 +78,9 @@ Each entry can also be managed individually without replacing the whole group:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, CronEntry, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "cleanup")]
 > # struct Cleanup;
-> # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > // Add or replace one entry.
 > client

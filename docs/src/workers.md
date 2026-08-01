@@ -10,9 +10,9 @@ failures. Build one with `Worker::builder()`:
 > # use serde::{Deserialize, Serialize};
 > # use std::convert::Infallible;
 > # use zizq::{Client, JobKind, Router, Worker};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
 > # async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
 > let worker = Worker::builder()
 >     .client(client)
@@ -79,12 +79,12 @@ right `JobKind` automatically. Register one handler per type with `.route`:
 > # use serde::{Deserialize, Serialize};
 > # use std::convert::Infallible;
 > # use zizq::Router;
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, zizq::JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl zizq::JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, zizq::JobKind)]
+> # #[zizq(name = "process_report")]
 > # struct ProcessReport { id: u64 }
-> # impl zizq::JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
 > let router = Router::new()
 >     .route(async |job: SendEmail| {
 >         // ... send the email ...
@@ -112,12 +112,12 @@ is cloned per invocation — wrap heavy state in `Arc<...>` so clones are cheap.
 > # use std::convert::Infallible;
 > # use std::sync::Arc;
 > # use zizq::{JobKind, Router, State};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "process_report")]
 > # struct ProcessReport { id: u64 }
-> # impl JobKind for ProcessReport { const NAME: &'static str = "process_report"; }
 > #[derive(Clone)]
 > struct AppState {
 >     // pretend these are a database pool, mailer, etc.

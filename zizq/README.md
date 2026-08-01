@@ -25,7 +25,7 @@ platform's native TLS library.
 
 ```toml
 [dependencies]
-zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
+zizq = { version = "0.6", default-features = false, features = ["native-tls", "derive"] }
 ```
 
 ## Features
@@ -33,8 +33,11 @@ zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
 - `Client` + builder, with configurable connect/read timeouts and
       TCP keep-alive
 - JSON or MessagePack API formats (MessagePack by default)
-- `JobKind` trait for per-type defaults (queue, priority, retry
-      limit, backoff, retention, uniqueness key, batched job config)
+- `#[derive(JobKind)]` — declarative per-type config via
+      `#[zizq(...)]` attributes (name, queue, priority, retry limit,
+      backoff, retention, uniqueness, batching). Manual
+      `impl JobKind` remains available for cases the derive doesn't
+      cover (generics, computed defaults, etc.)
 - Single-job enqueue via a builder that resolves trait
       defaults and per-call overrides
 - Bulk enqueue — many jobs submitted in a single request
@@ -67,15 +70,10 @@ Read the [docs](https://zizq.io/docs/clients/rust/) for complete documentation.
 use serde::{Deserialize, Serialize};
 use zizq::{Client, JobKind};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "send_email", queue = "emails", priority = 100)]
 struct SendEmail {
     to: String,
-}
-
-impl JobKind for SendEmail {
-    const NAME: &'static str = "send_email";
-    const QUEUE: &'static str = "emails";
-    const PRIORITY: Option<u16> = Some(100);
 }
 
 #[tokio::main]
@@ -86,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client
         .enqueue(SendEmail { to: "alice@example.com".into() })
-        .priority(50)              // override the trait default
+        .priority(50)              // override the derive default
         .retry_limit(3)
         .await?;
 
@@ -94,10 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`JobKind` is the only required piece per job type — `NAME` is mandatory,
-everything else has a default. Per-call overrides on the
-`EnqueueBuilder` beat the trait defaults, and the future is finalised
-by awaiting the builder.
+`JobKind` is the only required piece per job type — `#[derive(JobKind)]`
+generates the trait impl from `#[zizq(...)]` attributes. `name`
+defaults to the struct's identifier when absent; every other field is
+optional. Per-call overrides on the `EnqueueBuilder` beat the derive
+defaults, and the future is finalised by awaiting the builder.
+
+If your job needs behaviour that doesn't fit the attribute grammar —
+computed defaults, generic payloads, dynamic keys — implement
+`JobKind` by hand instead. See [Manual JobKind
+impl](#manual-jobkind-impl) below.
 
 ### Consumer
 
@@ -113,17 +117,13 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use zizq::{Client, JobKind, Router, Worker};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "send_email")]
 struct SendEmail { to: String }
-impl JobKind for SendEmail {
-    const NAME: &'static str = "send_email";
-}
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "process_report")]
 struct ProcessReport { report_id: String }
-impl JobKind for ProcessReport {
-    const NAME: &'static str = "process_report";
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -174,9 +174,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use zizq::{JobKind, Router, State};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "send_email")]
 struct SendEmail { to: String }
-impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
 
 #[derive(Clone)]
 struct AppState {
@@ -204,11 +204,9 @@ server.
 use serde::{Deserialize, Serialize};
 use zizq::{Client, CronEntry, JobKind};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "nightly_cleanup")]
 struct NightlyCleanup;
-impl JobKind for NightlyCleanup {
-    const NAME: &'static str = "nightly_cleanup";
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -231,6 +229,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 A `CronEntry` is built from the same `enqueue(...)` builder you'd use to
 enqueue the job directly. The server then enqueues that job on schedule.
+
+### Manual JobKind impl
+
+The derive covers the common cases. When you need something the
+attribute grammar doesn't express — generic payload types, defaults
+computed at runtime, a `unique_key` that reaches into `&self` in
+non-trivial ways — implement `JobKind` by hand. Every field that
+has a `#[zizq(...)]` counterpart has a corresponding associated
+constant or trait method:
+
+```rust
+use serde::{Deserialize, Serialize};
+use zizq::{JobKind, UniqueKey};
+
+#[derive(Serialize, Deserialize)]
+struct SendEmail {
+    user_id: u64,
+    body: String,
+}
+
+impl JobKind for SendEmail {
+    const NAME: &'static str = "send_email";
+    const QUEUE: &'static str = "emails";
+    const PRIORITY: Option<u16> = Some(100);
+
+    fn unique_key(&self) -> Option<UniqueKey> {
+        Some(UniqueKey::tagged_hash_of(Self::NAME, &self.user_id))
+    }
+}
+```
+
+Mixing is fine — a job type you define by hand and another via
+derive coexist in the same router and worker without issue.
 
 ### Lower-level API
 

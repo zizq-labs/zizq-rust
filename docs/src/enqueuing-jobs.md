@@ -9,9 +9,9 @@ that you `.await` to send the request:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let job = client
 >     .enqueue(SendEmail { to: "alice@example.com".into() })
@@ -36,9 +36,9 @@ constant, then to the server default.
 > # use serde::{Deserialize, Serialize};
 > # use std::time::Duration;
 > # use zizq::{Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > client
 >     .enqueue(SendEmail { to: "alice@example.com".into() })
@@ -117,9 +117,9 @@ returns a `BulkEnqueueBuilder` that collects per-job `EnqueueBuilder`s:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let jobs = client
 >     .enqueue_bulk()
@@ -139,9 +139,9 @@ mutating `.push` instead:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "send_email")]
 > # struct SendEmail { to: String }
-> # impl JobKind for SendEmail { const NAME: &'static str = "send_email"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let mut batch = client.enqueue_bulk();
 > for n in 0..1000 {

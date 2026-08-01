@@ -28,7 +28,7 @@ To use the native backend instead of the default:
 >
 > ```toml
 > [dependencies]
-> zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
+> zizq = { version = "0.6", default-features = false, features = ["native-tls", "derive"] }
 > ```
 
 ## Versioning

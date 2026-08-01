@@ -55,17 +55,20 @@ jobs:
       - name: cargo clippy zizq (no TLS, no derive)
         run: cargo clippy -p zizq --all-targets --no-default-features
 
-      # Confirm the `zizq` crate builds and tests cleanly with the
-      # `derive` feature (and each TLS backend) off — the user opt-out
-      # path. Also runs zizq-derive unit tests in isolation for
-      # visibility (they're also included in the workspace `cargo test`
-      # in the `test` job below).
+      # Confirm the `zizq` crate builds and tests cleanly with each
+      # feature combination — the user opt-out paths. `--all-targets`
+      # runs lib + integration tests but skips doctests, which
+      # intentionally use `#[derive(JobKind)]` and only compile with
+      # the `derive` feature. The workspace-level `cargo test` in the
+      # `test` job below still exercises doctests with default
+      # features. Also runs zizq-derive unit tests in isolation for
+      # visibility.
       - name: Test zizq feature combinations
         run: |
-          cargo test -p zizq --no-default-features --features rustls-tls
-          cargo test -p zizq --no-default-features --features native-tls
-          cargo test -p zizq --no-default-features --features derive
-          cargo test -p zizq --no-default-features
+          cargo test -p zizq --no-default-features --features rustls-tls --all-targets
+          cargo test -p zizq --no-default-features --features native-tls --all-targets
+          cargo test -p zizq --no-default-features --features derive --all-targets
+          cargo test -p zizq --no-default-features --all-targets
           cargo test -p zizq-derive
 
   test:

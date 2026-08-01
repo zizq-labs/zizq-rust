@@ -11,17 +11,13 @@
 //! # use serde::{Deserialize, Serialize};
 //! # use std::convert::Infallible;
 //! # use zizq::{Client, JobKind, Router, Worker};
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(Serialize, Deserialize, JobKind)]
+//! #[zizq(name = "send_email")]
 //! struct SendEmail { to: String }
-//! impl JobKind for SendEmail {
-//!     const NAME: &'static str = "send_email";
-//! }
 //!
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(Serialize, Deserialize, JobKind)]
+//! #[zizq(name = "process_report")]
 //! struct ProcessReport { report_id: String }
-//! impl JobKind for ProcessReport {
-//!     const NAME: &'static str = "process_report";
-//! }
 //!
 //! # fn build(client: Client) -> Result<Worker, zizq::ZizqError> {
 //! Worker::builder()
@@ -47,11 +43,9 @@
 //! # use std::convert::Infallible;
 //! # use std::sync::Arc;
 //! # use zizq::{JobKind, Router, State};
-//! # #[derive(Serialize, Deserialize)]
+//! # #[derive(Serialize, Deserialize, JobKind)]
+//! # #[zizq(name = "send_email")]
 //! # struct SendEmail { to: String }
-//! # impl JobKind for SendEmail {
-//! #     const NAME: &'static str = "send_email";
-//! # }
 //! #[derive(Clone)]
 //! struct AppState { mailer: Arc<()> /* ... */ }
 //!
@@ -186,11 +180,9 @@ pub trait IntoRouteHandler<S, T, Marker> {
 /// # use serde::{Deserialize, Serialize};
 /// # use std::convert::Infallible;
 /// # use zizq::{JobKind, Router};
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(Serialize, Deserialize, JobKind)]
+/// #[zizq(name = "send_email")]
 /// struct SendEmail { to: String }
-/// impl JobKind for SendEmail {
-///     const NAME: &'static str = "send_email";
-/// }
 ///
 /// let router = Router::new().route(|job: SendEmail| async move {
 ///     println!("sending email to {}", job.to);
@@ -227,11 +219,9 @@ impl Router<()> {
     /// # use std::convert::Infallible;
     /// # use std::sync::Arc;
     /// # use zizq::{JobKind, Router, State};
-    /// # #[derive(Serialize, Deserialize)]
+    /// # #[derive(Serialize, Deserialize, JobKind)]
+    /// # #[zizq(name = "send_email")]
     /// # struct SendEmail { to: String }
-    /// # impl JobKind for SendEmail {
-    /// #     const NAME: &'static str = "send_email";
-    /// # }
     /// #[derive(Clone)]
     /// struct AppState {
     ///     // pretend this is a pool, mailer, etc.

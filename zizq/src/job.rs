@@ -15,29 +15,42 @@ use crate::unique_key::UniqueKey;
 /// defaults.
 ///
 /// Implement this on the payload struct for each job your application
-/// produces. [`Self::NAME`] is the only required associated constant;
-/// everything else has a default that can still be overridden per-job
-/// at the call site via [`EnqueueBuilder`].
+/// produces. Most types can be built with the [`#[derive(JobKind)]`][derive]
+/// proc-macro via `#[zizq(...)]` attributes; a hand-written `impl` is
+/// available for cases the derive doesn't cover (generics, defaults
+/// computed at runtime, `unique_key` / `batch` bodies that need custom
+/// logic).
 ///
+/// [`Self::NAME`] is the only required item — either the `name`
+/// attribute is set, or the derive falls back to the struct's
+/// identifier. Everything else has a default that can still be
+/// overridden per-job at the call site via [`EnqueueBuilder`].
+///
+/// [derive]: derive@crate::JobKind
 /// [`EnqueueBuilder`]: crate::EnqueueBuilder
 ///
 /// # Examples
 ///
-/// Minimal — only the required name:
+/// The recommended path — `#[derive(JobKind)]` with `#[zizq(...)]`:
 ///
 /// ```
 /// use serde::{Deserialize, Serialize};
 /// use zizq::JobKind;
 ///
-/// #[derive(Serialize, Deserialize)]
-/// struct Ping;
-///
-/// impl JobKind for Ping {
-///     const NAME: &'static str = "ping_job";
+/// #[derive(Serialize, Deserialize, JobKind)]
+/// #[zizq(name = "send_email", queue = "emails", priority = 50)]
+/// struct SendEmail {
+///     to: String,
 /// }
 /// ```
 ///
-/// With defaults overridden, and a unique key derived from the payload:
+/// See the `#[derive(JobKind)]` docs for the full attribute grammar
+/// — `backoff(...)`, `retention(...)`, `unique(...)`, and `batch(...)`
+/// are all supported.
+///
+/// Or the same shape written by hand — useful when you need behaviour
+/// the attribute grammar can't express, and the form you'll produce if
+/// you disable the `derive` feature:
 ///
 /// ```
 /// use serde::{Deserialize, Serialize};
@@ -58,6 +71,12 @@ use crate::unique_key::UniqueKey;
 ///     }
 /// }
 /// ```
+///
+/// Deriving on some job types and hand-implementing on others is fine
+/// — they coexist in the same worker and router without issue. But
+/// Rust's coherence rule means each individual type is either fully
+/// derived or fully hand-implemented; you can't split a single trait
+/// impl across the two forms.
 pub trait JobKind: Serialize + DeserializeOwned + Send + 'static {
     /// The underlying name of the job type used in the Zizq API.
     ///

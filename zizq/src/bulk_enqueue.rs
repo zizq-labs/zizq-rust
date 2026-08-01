@@ -41,11 +41,9 @@ use crate::resources::Job;
 /// use serde::{Deserialize, Serialize};
 /// use zizq::{Client, JobKind};
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(Serialize, Deserialize, JobKind)]
+/// #[zizq(name = "send_email")]
 /// struct SendEmail { to: String }
-/// impl JobKind for SendEmail {
-///     const NAME: &'static str = "send_email";
-/// }
 ///
 /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
 /// let jobs = client

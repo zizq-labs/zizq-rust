@@ -104,13 +104,9 @@ impl Client {
     /// use serde::{Deserialize, Serialize};
     /// use zizq::{Client, JobKind};
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(Serialize, Deserialize, JobKind)]
+    /// #[zizq(name = "send_email", queue = "emails")]
     /// struct SendEmail { to: String }
-    ///
-    /// impl JobKind for SendEmail {
-    ///     const NAME: &'static str = "send_email";
-    ///     const QUEUE: &'static str = "emails";
-    /// }
     ///
     /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let job = client
@@ -141,11 +137,9 @@ impl Client {
     /// use serde::{Deserialize, Serialize};
     /// use zizq::{Client, JobKind};
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(Serialize, Deserialize, JobKind)]
+    /// #[zizq(name = "send_email")]
     /// struct SendEmail { to: String }
-    /// impl JobKind for SendEmail {
-    ///     const NAME: &'static str = "send_email";
-    /// }
     ///
     /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
     /// // Inline / chained:
@@ -406,9 +400,9 @@ impl Client {
     /// ```no_run
     /// # use serde::{Deserialize, Serialize};
     /// # use zizq::{Client, CronEntry, JobKind};
-    /// # #[derive(Serialize, Deserialize)]
+    /// # #[derive(Serialize, Deserialize, JobKind)]
+    /// # #[zizq(name = "cleanup")]
     /// # struct Cleanup;
-    /// # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
     /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
     /// client
     ///     .replace_cron("maintenance")

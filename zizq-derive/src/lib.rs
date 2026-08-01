@@ -167,7 +167,7 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
 /// runtime parse call — so there's no "panic on first
 /// unique_key() call, six hours after startup" failure mode.
 fn emit_unique_key(unique: &UniqueAttr) -> syn::Result<TokenStream2> {
-    let prefix_on = unique.prefix.as_ref().map_or(true, |b| b.value);
+    let prefix_on = unique.prefix.as_ref().is_none_or(|b| b.value);
 
     // Build the "hashable" expression — either `self` directly (bare)
     // or the result of subsetting via a runtime helper.
@@ -304,7 +304,7 @@ fn emit_batch(batch: &BatchAttr) -> syn::Result<TokenStream2> {
         .key
         .as_ref()
         .and_then(|k| k.prefix.as_ref())
-        .map_or(true, |b| b.value);
+        .is_none_or(|b| b.value);
     let hash_call = if prefix_on {
         quote! {
             ::zizq::UniqueKey::tagged_hash_of(

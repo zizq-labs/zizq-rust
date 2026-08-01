@@ -77,10 +77,8 @@ pub fn remove(value: &mut Value, path: &[PathStep]) {
         (PathStep::Field(name), Value::Object(map)) => {
             map.remove(name);
         }
-        (PathStep::Index(idx), Value::Array(arr)) => {
-            if *idx < arr.len() {
-                arr.remove(*idx);
-            }
+        (PathStep::Index(idx), Value::Array(arr)) if *idx < arr.len() => {
+            arr.remove(*idx);
         }
         _ => {}
     }

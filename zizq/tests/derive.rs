@@ -292,7 +292,7 @@ fn unique_composes_only_scope_and_prefix() {
     // Hash must equal `hash_of(payload_only(&job, [".platform"]))`
     // which — because only the platform is in the picked subset —
     // is the hash of `{"platform": "apple"}`.
-    let expected = UniqueKey::hash_of(&serde_json::json!({ "platform": "apple" }));
+    let expected = UniqueKey::hash_of(serde_json::json!({ "platform": "apple" }));
     assert_eq!(key.key, expected.key);
 }
 
@@ -319,7 +319,7 @@ fn bare_batch_emits_config_and_default_key() {
     // Default key = payload minus the batch path, tagged with type
     // name. So `platform` alone drives the key.
     let expected_key =
-        UniqueKey::tagged_hash_of(Push::NAME, &serde_json::json!({ "platform": "apple" }));
+        UniqueKey::tagged_hash_of(Push::NAME, serde_json::json!({ "platform": "apple" }));
     assert_eq!(cfg.key, expected_key.key);
 }
 
@@ -423,10 +423,10 @@ fn batch_key_prefix_false_uses_untagged_hash() {
     };
     let cfg = job.batch().unwrap();
     // With prefix off, key = hash_of({"platform": "apple"}).
-    let expected = UniqueKey::hash_of(&serde_json::json!({ "platform": "apple" }));
+    let expected = UniqueKey::hash_of(serde_json::json!({ "platform": "apple" }));
     assert_eq!(cfg.key, expected.key);
     // And it's NOT the tagged form.
-    let tagged = UniqueKey::tagged_hash_of(Push::NAME, &serde_json::json!({ "platform": "apple" }));
+    let tagged = UniqueKey::tagged_hash_of(Push::NAME, serde_json::json!({ "platform": "apple" }));
     assert_ne!(cfg.key, tagged.key);
 }
 

@@ -975,7 +975,7 @@ mod tests {
     fn parses_unique_prefix_false() {
         let attrs = parse_str(r#"#[zizq(unique(prefix = false))] struct Foo;"#).unwrap();
         let u = attrs.unique.unwrap();
-        assert_eq!(u.prefix.unwrap().value, false);
+        assert!(!u.prefix.unwrap().value);
     }
 
     #[test]
@@ -987,7 +987,7 @@ mod tests {
         let u = attrs.unique.unwrap();
         assert!(matches!(u.selection, Some(UniqueSelection::Only(_))));
         assert_eq!(u.scope, Some(UniqueScopeAttr::Active));
-        assert_eq!(u.prefix.unwrap().value, false);
+        assert!(!u.prefix.unwrap().value);
     }
 
     #[test]
@@ -1137,7 +1137,7 @@ mod tests {
         )
         .unwrap();
         let b = attrs.batch.unwrap();
-        assert_eq!(b.key.unwrap().prefix.unwrap().value, false);
+        assert!(!b.key.unwrap().prefix.unwrap().value);
     }
 
     #[test]

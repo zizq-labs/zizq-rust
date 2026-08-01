@@ -283,10 +283,8 @@ mod tests {
         };
         // Excluding the batch path yields the same hashable → same key
         // — this is the property the batch-key derivation relies on.
-        let key_a =
-            UniqueKey::hash_of(&payload_except(&a, &paths([vec![field("device_ids")]]))).key;
-        let key_b =
-            UniqueKey::hash_of(&payload_except(&b, &paths([vec![field("device_ids")]]))).key;
+        let key_a = UniqueKey::hash_of(payload_except(&a, &paths([vec![field("device_ids")]]))).key;
+        let key_b = UniqueKey::hash_of(payload_except(&b, &paths([vec![field("device_ids")]]))).key;
         assert_eq!(key_a, key_b);
     }
 
@@ -303,8 +301,8 @@ mod tests {
             tenant_id: 42,
         };
         let key_apple =
-            UniqueKey::hash_of(&payload_except(&apple, &paths([vec![field("device_ids")]]))).key;
-        let key_android = UniqueKey::hash_of(&payload_except(
+            UniqueKey::hash_of(payload_except(&apple, &paths([vec![field("device_ids")]]))).key;
+        let key_android = UniqueKey::hash_of(payload_except(
             &android,
             &paths([vec![field("device_ids")]]),
         ))

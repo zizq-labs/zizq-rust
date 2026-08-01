@@ -15,9 +15,13 @@
 //!
 //! - [`Client`] is the cheaply-clonable handle. Configure it once with
 //!   [`Client::builder`] and share it across tasks.
-//! - [`JobKind`] is a trait you implement on each payload struct. It
-//!   declares the API-level job type name and any per-type defaults
-//!   (queue, priority, retry limit, uniqueness).
+//! - [`JobKind`] is a trait each payload struct implements — usually
+//!   via [`#[derive(JobKind)]`][derive] with `#[zizq(...)]` attributes,
+//!   or by hand for cases the derive doesn't cover. It declares the
+//!   API-level job type name and any per-type defaults (queue,
+//!   priority, retry limit, backoff, retention, uniqueness, batching).
+//!
+//! [derive]: derive@crate::JobKind
 //! - [`Client::enqueue`] returns an [`EnqueueBuilder`] that chains
 //!   per-job overrides and awaits to send the request.
 //! - [`Worker`] is the recommended consumer API — it streams jobs,
@@ -44,23 +48,16 @@
 //! use std::convert::Infallible;
 //! use zizq::{Client, JobKind, Router, Worker};
 //!
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(Serialize, Deserialize, JobKind)]
+//! #[zizq(name = "send_email", queue = "emails")]
 //! struct SendEmail {
 //!     to: String,
 //! }
 //!
-//! impl JobKind for SendEmail {
-//!     const NAME: &'static str = "send_email";
-//!     const QUEUE: &'static str = "emails";
-//! }
-//!
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(Serialize, Deserialize, JobKind)]
+//! #[zizq(name = "process_report")]
 //! struct ProcessReport {
 //!     report_id: String,
-//! }
-//!
-//! impl JobKind for ProcessReport {
-//!     const NAME: &'static str = "process_report";
 //! }
 //!
 //! /// Producer side — enqueue work.

@@ -182,9 +182,9 @@ pub(crate) struct CronEntryBody {
 /// ```no_run
 /// # use serde::{Deserialize, Serialize};
 /// # use zizq::{Client, CronEntry, JobKind};
-/// # #[derive(Serialize, Deserialize)]
+/// # #[derive(Serialize, Deserialize, JobKind)]
+/// # #[zizq(name = "cleanup")]
 /// # struct Cleanup { older_than_days: u32 }
-/// # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
 /// # fn build(client: &Client) -> CronEntry {
 /// CronEntry::new(
 ///     "nightly-cleanup",

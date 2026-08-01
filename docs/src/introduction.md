@@ -51,14 +51,10 @@ A minimal producer and consumer look like this:
 > use std::convert::Infallible;
 > use zizq::{Client, JobKind, Router, Worker};
 > 
-> #[derive(Serialize, Deserialize)]
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(name = "send_email", queue = "emails")]
 > struct SendEmail {
 >     to: String,
-> }
-> 
-> impl JobKind for SendEmail {
->     const NAME: &'static str = "send_email";
->     const QUEUE: &'static str = "emails";
 > }
 > 
 > #[tokio::main]

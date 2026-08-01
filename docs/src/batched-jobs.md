@@ -72,14 +72,11 @@ payload itself is the array being accumulated.
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{BatchConfig, Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "audit.events", queue = "audit")]
 > # struct AuditEvents(Vec<AuditEvent>);
 > # #[derive(Serialize, Deserialize)]
 > # struct AuditEvent { actor: String, action: String }
-> # impl JobKind for AuditEvents {
-> #     const NAME: &'static str = "audit.events";
-> #     const QUEUE: &'static str = "audit";
-> # }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > client
 >     .enqueue(AuditEvents(vec![AuditEvent {
@@ -102,12 +99,9 @@ When the payload is a struct with a specific field to accumulate, pass the
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{BatchConfig, Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "push.notifications", queue = "push")]
 > # struct PushNotifications { device_ids: Vec<String>, platform: String }
-> # impl JobKind for PushNotifications {
-> #     const NAME: &'static str = "push.notifications";
-> #     const QUEUE: &'static str = "push";
-> # }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > client
 >     .enqueue(PushNotifications {
@@ -123,6 +117,32 @@ Path syntax is jq-compatible: `.`, `.foo`, `.foo.bar`, `.foo[0]`, `.[0]`, and
 `.["key.with.dots"]` for keys that themselves contain literal dots. Invalid
 paths surface as `422 Unprocessable Entity` on the first enqueue (see
 [Enqueue-time validation](#enqueue-time-validation) below).
+
+> [!IMPORTANT]
+> Paths (both the batch `path` and any `key(only|except)` paths in
+> the derive form below) address the **serialized** field names, not
+> the Rust field identifiers. If your struct uses `#[serde(rename =
+> "...")]` or `#[serde(rename_all = "...")]` to change the wire form,
+> the paths must match the wire form too — payloads are hashed and
+> folded *after* serialisation.
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[serde(rename_all = "camelCase")]
+> #[zizq(name = "push", batch(path = ".deviceIds", limit = 100))]
+> struct Push {
+>     device_ids: Vec<String>,   // serialises as "deviceIds"
+>     platform: String,
+> }
+> ```
+>
+> Using `.device_ids` here would silently match nothing on the server,
+> which for the batch path would break folding entirely (the `when`
+> and `fold` expressions would never find the list they're supposed
+> to accumulate into) and for `key(only|except)` would collapse the
+> hashed subset to `{}` — every enqueue getting the same key.
 
 ### Options
 
@@ -203,11 +223,9 @@ computed string on its `.key` field:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{BatchConfig, Client, JobKind, UniqueKey};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "push.notifications")]
 > # struct PushNotifications { device_ids: Vec<String>, platform: String }
-> # impl JobKind for PushNotifications {
-> #     const NAME: &'static str = "push.notifications";
-> # }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let payload = PushNotifications {
 >     device_ids: vec!["abc".into()],
@@ -229,46 +247,88 @@ different keys go to separate batches.
 
 ## Attaching a `BatchConfig` to a job
 
-There are two ways to attach a config to a job — the same two-tier pattern as
-[unique keys](./unique-jobs.md#supplying-a-key).
+There are two ways to attach a config to a job.
 
-**Per job type** — override `JobKind::batch` to derive a config from `&self`.
-Every enqueue of that type then carries it automatically:
+**Per job type via `#[zizq(batch(...))]`** — the derive generates a
+`fn batch(&self)` from the attribute:
 
 > Rust:
 >
 > ```rust
 > # use serde::{Deserialize, Serialize};
-> use zizq::{BatchConfig, JobKind, UniqueKey};
->
-> # #[derive(Serialize, Deserialize)]
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(
+>     name = "push.notifications",
+>     queue = "push",
+>     batch(path = ".device_ids", limit = 100),
+> )]
 > struct PushNotifications {
 >     device_ids: Vec<String>,
 >     platform: String,
 > }
+> ```
+
+`path` and `limit` are required. The default batch key is a hash of the
+payload with the batch path excluded — so two enqueues that differ only in
+`.device_ids` collide (and fold), and enqueues that differ in `platform`
+end up in separate batches.
+
+Add `dedup` or `sorted` (mutually exclusive) to switch the fold expression
+from append to `| unique` or `| sort`:
+
+> Rust:
 >
-> impl JobKind for PushNotifications {
->     const NAME: &'static str = "push.notifications";
->     const QUEUE: &'static str = "push";
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(name = "push", batch(path = ".device_ids", limit = 100, dedup))]
+> struct Push { device_ids: Vec<String> }
+> ```
+
+The `key(...)` inner attribute controls what contributes to the batch key.
+`only` and `except` narrow the hashed subset via jq-compatible paths (same
+grammar as [unique-jobs](./unique-jobs.md#selecting-a-subset)); `prefix =
+false` drops the type-name tag. `except` is **additive** to the batch
+`path` — the batch data is always excluded from the key regardless.
+
+> Rust:
 >
->     fn batch(&self) -> Option<BatchConfig> {
->         let key = UniqueKey::tagged_hash_of(Self::NAME, &self.platform).key;
->         Some(BatchConfig::at(".device_ids", 100).keyed_by(key))
->     }
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(
+>     name = "push",
+>     batch(
+>         path = ".device_ids",
+>         limit = 100,
+>         key(only = [".platform"]),
+>     ),
+> )]
+> struct Push {
+>     device_ids: Vec<String>,
+>     platform: String,
+>     tenant_id: u64,     // ignored — not in `only`
 > }
 > ```
 
-**Per enqueue** — supply a config for a single call with
-`EnqueueBuilder::batch`. This overrides whatever the `JobKind` would derive:
+All paths (the batch `path` and any `key(only|except)` paths) are validated
+at compile time — malformed jq syntax surfaces as a compile error with a
+caret on the offending string literal.
+
+**Per enqueue via `EnqueueBuilder::batch`** — supply a config for a single
+call, overriding whatever the `JobKind` would derive:
 
 > Rust:
 >
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{BatchConfig, Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "push.notifications")]
 > # struct PushNotifications { device_ids: Vec<String>, platform: String }
-> # impl JobKind for PushNotifications { const NAME: &'static str = "push.notifications"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > client
 >     .enqueue(PushNotifications {
@@ -297,14 +357,11 @@ within the fold that goes beyond what `.dedup()` would do:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{BatchConfig, Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "audit.events", queue = "audit")]
 > # struct AuditBatch { tenant_id: String, events: Vec<AuditEvent> }
 > # #[derive(Serialize, Deserialize)]
 > # struct AuditEvent { id: String, actor: String, action: String }
-> # impl JobKind for AuditBatch {
-> #     const NAME: &'static str = "audit.events";
-> #     const QUEUE: &'static str = "audit";
-> # }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let payload = AuditBatch {
 >     tenant_id: "acme".into(),
@@ -336,6 +393,45 @@ within the fold that goes beyond what `.dedup()` would do:
 
 Bring your own jq — the server evaluates it against the payloads.
 
+## Manual `batch` impl
+
+The derive's `#[zizq(batch(...))]` covers the common cases: a fixed jq
+path + limit, standard fold modes, key derivation from payload fields.
+Reach for a hand-written `fn batch(&self)` when the key needs computation
+the attribute grammar can't express — reading runtime state, bucketing by
+time windows, or combining values that don't map cleanly to `only`/`except`.
+
+The signature mirrors what the derive generates:
+
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> use zizq::{BatchConfig, JobKind, UniqueKey};
+>
+> # #[derive(Serialize, Deserialize)]
+> struct PushNotifications {
+>     device_ids: Vec<String>,
+>     platform: String,
+> }
+>
+> impl JobKind for PushNotifications {
+>     const NAME: &'static str = "push.notifications";
+>     const QUEUE: &'static str = "push";
+>
+>     fn batch(&self) -> Option<BatchConfig> {
+>         // Hash whichever fields identify the batch. The derive would
+>         // do this via `key(only = [".platform"])`; the manual form
+>         // lets you reach into `&self` however you need to.
+>         let key = UniqueKey::tagged_hash_of(Self::NAME, &self.platform).key;
+>         Some(BatchConfig::at(".device_ids", 100).keyed_by(key))
+>     }
+> }
+> ```
+
+Mix and match: a job type with `#[zizq(batch(...))]` and one with a manual
+`fn batch(&self)` coexist in the same worker without issue.
+
 ## The returned `Job`
 
 Awaiting an enqueue returns a `Job` whose `folded` flag tells you whether
@@ -346,12 +442,9 @@ this enqueue was folded into an existing pending job or created a new one:
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{BatchConfig, Client, JobKind};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "push.notifications", queue = "push")]
 > # struct PushNotifications { device_ids: Vec<String>, platform: String }
-> # impl JobKind for PushNotifications {
-> #     const NAME: &'static str = "push.notifications";
-> #     const QUEUE: &'static str = "push";
-> # }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > // First enqueue creates the batch.
 > let first = client

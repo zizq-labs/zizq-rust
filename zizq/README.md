@@ -25,7 +25,7 @@ platform's native TLS library.
 
 ```toml
 [dependencies]
-zizq = { version = "0.3", default-features = false, features = ["native-tls"] }
+zizq = { version = "0.6", default-features = false, features = ["native-tls", "derive"] }
 ```
 
 ## Features

@@ -10,86 +10,88 @@ key's scope — returning the existing job instead of creating a second one.
 This solves problems like "only one `rebuild_search_index` job should be
 queued at a time", or "don't email the same user twice for the same event".
 
-## Building a key
+## Deriving a unique key
 
-The recommended way to build a key from data is to **hash** it.
-`UniqueKey::tagged_hash_of` serialises a value to canonical JSON (object keys
-sorted, so the result is independent of field ordering) and hashes it with
-SHA-256. The tag — pass the job type name — is a readable prefix that keeps
-two job types from colliding on identical data. `UniqueKey::hash_of` is the
-same without the tag.
+The `#[zizq(unique(...))]` attribute on `#[derive(JobKind)]` generates a
+`unique_key` implementation that hashes the payload (or a subset of it) and
+attaches it to every enqueue automatically.
 
-Pass whatever identifies the job: the whole payload (`self`), a single field
-(`&self.field`), or a tuple of fields for a subset:
-
-> Rust:
->
-> ```rust
-> # use zizq::UniqueKey;
-> // Whole payload.
-> # let _ =
-> UniqueKey::tagged_hash_of("send_email", ("alice@example.com", "Welcome!"))
-> # ;
-> ```
-
-> [!NOTE]
-> A tuple of fields serialises to a JSON array, so the order of its elements
-> matters — keep it stable.
-
-If you already have a key string, wrap it verbatim with `UniqueKey::raw` — no
-hashing or transformation is applied.
-
-## Supplying a key
-
-There are two ways to attach a key to a job.
-
-**Per job type** — override `JobKind::unique_key` to derive a key from the
-payload. Every enqueue of that type then carries it automatically:
+The bare form hashes the entire payload, tagged with the job type name:
 
 > Rust:
 >
 > ```rust
 > # use serde::{Deserialize, Serialize};
-> use zizq::{JobKind, UniqueKey};
-> 
-> # #[derive(Serialize, Deserialize)]
-> struct SendWelcomeEmail {
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(name = "rebuild_index", unique)]
+> struct RebuildIndex;
+> ```
+
+For a job type with no fields, "hash the whole payload" is a stable per-type
+key — perfect for the "only one queued at a time" case.
+
+### Selecting a subset
+
+`only` and `except` narrow the hashed subset via jq-compatible paths:
+
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::JobKind;
+> // Two jobs collide when they share `user_id` and `campaign_id`,
+> // regardless of what `body` contains.
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(name = "send_email", unique(only = [".user_id", ".campaign_id"]))]
+> struct SendEmail {
 >     user_id: u64,
-> }
-> 
-> impl JobKind for SendWelcomeEmail {
->     const NAME: &'static str = "send_welcome_email";
-> 
->     fn unique_key(&self) -> Option<UniqueKey> {
->         Some(UniqueKey::tagged_hash_of(Self::NAME, &self.user_id))
->     }
+>     campaign_id: u64,
+>     body: String,
 > }
 > ```
 
-**Per enqueue** — supply a key for a single call with
-`EnqueueBuilder::unique_key`. This overrides whatever the `JobKind` would
-derive:
+`except` is the inverse — hash everything but the listed paths. `only` and
+`except` are mutually exclusive; setting both is a compile error.
+
+Paths are validated at compile time. An unknown or malformed path (e.g.
+`user_id` without the leading `.`) surfaces as a compile error with a caret
+on the offending string literal.
+
+> [!IMPORTANT]
+> Paths address the **serialized** field names, not the Rust field
+> identifiers. If your struct uses `#[serde(rename = "...")]` or
+> `#[serde(rename_all = "...")]` to change the wire form, the paths must
+> match the wire form too. This is because the payload is hashed *after*
+> serialisation — the derive doesn't rewrite paths to match Rust names.
+
+For example, a struct that serialises to camelCase must use camelCase
+paths:
 
 > Rust:
 >
 > ```rust
 > # use serde::{Deserialize, Serialize};
-> # use zizq::{Client, JobKind, UniqueKey};
-> # #[derive(Serialize, Deserialize)]
-> # struct RebuildIndex;
-> # impl JobKind for RebuildIndex { const NAME: &'static str = "rebuild_index"; }
-> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
-> client
->     .enqueue(RebuildIndex)
->     .unique_key(UniqueKey::raw("rebuild_index"))
->     .await?;
-> # Ok(()) }
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[serde(rename_all = "camelCase")]
+> #[zizq(name = "send_email", unique(only = [".userId", ".campaignId"]))]
+> struct SendEmail {
+>     user_id: u64,       // serialises as "userId"
+>     campaign_id: u64,   // serialises as "campaignId"
+>     body: String,
+> }
 > ```
 
-## Scope
+Using `[".user_id"]` here would silently match nothing (jq's behaviour
+for missing keys), which would collapse the picked subset to `{}` and
+give every enqueue the same key — probably not what you want. If you're
+using serde renames, keep the two forms in sync.
 
-A `UniqueKey` has a *scope* — the lifecycle window during which it blocks
-duplicates. Set it with `UniqueScope`:
+### Scope
+
+The `scope` field selects the lifecycle window during which duplicates are
+rejected:
 
 <table>
     <thead>
@@ -97,15 +99,15 @@ duplicates. Set it with `UniqueScope`:
     </thead>
     <tbody>
         <tr>
-            <td><code>Queued</code></td>
+            <td><code>"queued"</code></td>
             <td>waiting to run (ready or scheduled) — the default.</td>
         </tr>
         <tr>
-            <td><code>Active</code></td>
+            <td><code>"active"</code></td>
             <td>queued <em>or</em> currently being processed.</td>
         </tr>
         <tr>
-            <td><code>Exists</code></td>
+            <td><code>"exists"</code></td>
             <td>
                 present in any state at all, including completed or dead
                 (until reaped by retention).
@@ -114,8 +116,56 @@ duplicates. Set it with `UniqueScope`:
     </tbody>
 </table>
 
-`UniqueKey::raw(key)` uses the default `Queued` scope. To choose a different
-scope, chain `.scope(...)`:
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(name = "reindex", unique(scope = "active"))]
+> struct Reindex;
+> ```
+
+### Dropping the type-name prefix
+
+By default the hash is prefixed with the job type name, so two different job
+types can't collide on identical payload data. Set `prefix = false` to opt
+out — useful when you want two job types to share a uniqueness namespace
+(for example, an insert-or-update pattern where either job type dedups
+against the other):
+
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::JobKind;
+> #[derive(Serialize, Deserialize, JobKind)]
+> #[zizq(name = "sync_user", unique(only = [".user_id"], prefix = false))]
+> struct SyncUser { user_id: u64 }
+> ```
+
+## Per-enqueue override
+
+`EnqueueBuilder::unique_key` supplies a key for a single call, overriding
+whatever the `JobKind` would produce:
+
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, JobKind, UniqueKey};
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "rebuild_index")]
+> # struct RebuildIndex;
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> client
+>     .enqueue(RebuildIndex)
+>     .unique_key(UniqueKey::raw("rebuild_index"))
+>     .await?;
+> # Ok(()) }
+> ```
+
+Chain `.scope(...)` on a `UniqueKey` to change the scope:
 
 > Rust:
 >
@@ -127,8 +177,8 @@ scope, chain `.scope(...)`:
 
 ## Detecting a duplicate
 
-When an enqueue collides with an existing unique job, the call still succeeds —
-it returns the *existing* job, with its `duplicate` field set to
+When an enqueue collides with an existing unique job, the call still succeeds
+— it returns the *existing* job, with its `duplicate` field set to
 `Some(true)`:
 
 > Rust:
@@ -136,9 +186,9 @@ it returns the *existing* job, with its `duplicate` field set to
 > ```rust
 > # use serde::{Deserialize, Serialize};
 > # use zizq::{Client, JobKind, UniqueKey};
-> # #[derive(Serialize, Deserialize)]
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "rebuild_index")]
 > # struct RebuildIndex;
-> # impl JobKind for RebuildIndex { const NAME: &'static str = "rebuild_index"; }
 > # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
 > let job = client
 >     .enqueue(RebuildIndex)
@@ -150,3 +200,47 @@ it returns the *existing* job, with its `duplicate` field set to
 > }
 > # Ok(()) }
 > ```
+
+## Manual `unique_key` impl
+
+The derive covers hashing-based keys — the 90% case. Reach for a hand-written
+`fn unique_key(&self)` when the key needs computation the attribute grammar
+can't express: reaching into `&self` in non-obvious ways, combining runtime
+state, or producing a raw string key without hashing.
+
+`UniqueKey::tagged_hash_of` is the same helper the derive uses under the
+hood; feed it whatever identifies the job — the whole payload (`self`), a
+single field (`&self.field`), or a tuple of fields:
+
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> use zizq::{JobKind, UniqueKey};
+> 
+> # #[derive(Serialize, Deserialize)]
+> struct SendWelcomeEmail {
+>     user_id: u64,
+>     campaign: String,
+> }
+> 
+> impl JobKind for SendWelcomeEmail {
+>     const NAME: &'static str = "send_welcome_email";
+> 
+>     fn unique_key(&self) -> Option<UniqueKey> {
+>         // Two elements — a tuple serialises to a JSON array, so
+>         // order matters and must stay stable.
+>         Some(UniqueKey::tagged_hash_of(
+>             Self::NAME,
+>             (&self.user_id, &self.campaign),
+>         ))
+>     }
+> }
+> ```
+
+`UniqueKey::hash_of` is the same without the tag prefix (equivalent to
+`unique(prefix = false)` on the derive). `UniqueKey::raw(key)` wraps a
+literal string verbatim — no hashing or transformation applied.
+
+Chain `.scope(UniqueScope::Active | Exists)` on the returned `UniqueKey` to
+match the derive's `scope = "active" | "exists"`.

@@ -108,6 +108,9 @@
 //! consume(client).await?;
 //! # Ok(()) }
 //! ```
+//!
+//! # Cargo features
+#![doc = document_features::document_features!()]
 
 mod batch;
 mod bulk_enqueue;
@@ -119,10 +122,12 @@ mod enqueue;
 mod error;
 mod failure;
 mod format;
+mod hashable;
 mod job;
 mod job_filter;
 mod job_patch;
 mod jq_expr;
+mod jq_path;
 mod list_errors;
 mod list_jobs;
 mod patch_jobs;
@@ -145,6 +150,9 @@ pub use error::ZizqError;
 pub use failure::FailureBuilder;
 pub use format::Format;
 pub use job::JobKind;
+// Re-export the derive macro under the same name — Rust looks up
+// derives in the macro namespace, so it doesn't collide with the
+// trait. Users write `use zizq::JobKind;` and get both.
 pub use job_patch::{JobPatch, RetentionPatch};
 pub use jq_expr::{jq_array_prefix_eq, jq_contains, jq_eq};
 pub use list_errors::ListErrorsBuilder;
@@ -159,3 +167,21 @@ pub use router::{Router, State};
 pub use take::{TakeBuilder, TakeStream};
 pub use unique_key::{UniqueKey, UniqueScope};
 pub use worker::{HandlerError, JobHandler, Worker, WorkerBuilder};
+#[cfg(feature = "derive")]
+pub use zizq_derive::JobKind;
+
+// Runtime helpers the derive-emitted code calls into. Public in the
+// Rust visibility sense so derives on downstream types can reach them,
+// hidden from the rendered docs because they aren't part of the API
+// users write against by hand. Do not depend on the contents of this
+// module directly — treat it as an implementation detail of
+// `#[derive(JobKind)]`.
+//
+// The derive parses every jq path at expansion time using its own
+// (duplicated) parser, so no `parse_path` is exposed here — emitted
+// code constructs `PathStep` values directly.
+#[doc(hidden)]
+pub mod __internal {
+    pub use crate::hashable::{payload_except, payload_only};
+    pub use crate::jq_path::PathStep;
+}

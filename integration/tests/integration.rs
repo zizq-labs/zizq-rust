@@ -760,3 +760,122 @@ async fn batched_invalid_jq_expression_is_rejected_with_422() {
         other => panic!("expected 422 or 403 Response, got {other:?}"),
     }
 }
+
+// --- Derive (`#[derive(JobKind)]`) ---
+//
+// These scenarios prove the derive-generated impl works end-to-end
+// against a real server — the same way a downstream user would define
+// their jobs. The manual `job_kind!` variants above cover the same
+// shapes with hand-written `impl JobKind`; these add derive coverage
+// on top.
+
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "derive.basic", queue = "integration", priority = 42)]
+struct DerivedBasic {
+    body: String,
+}
+
+#[tokio::test]
+async fn derive_basic_round_trip() {
+    let client = fresh().await;
+
+    let job = client
+        .enqueue(DerivedBasic {
+            body: "hello".into(),
+        })
+        .await
+        .expect("enqueue");
+
+    assert_eq!(job.job_type, "derive.basic");
+    assert_eq!(job.queue, "integration");
+    assert_eq!(job.priority, 42);
+
+    let fetched = client.get_job(&job.id).await.expect("get_job");
+    assert_eq!(fetched.payload, Some(json!({ "body": "hello" })));
+}
+
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(name = "derive.unique", queue = "integration", unique(only = [".user_id"]))]
+struct DerivedUnique {
+    user_id: u64,
+    body: String,
+}
+
+#[tokio::test]
+async fn derive_unique_key_dedups_by_only_fields() {
+    let client = fresh().await;
+
+    let first = match client
+        .enqueue(DerivedUnique {
+            user_id: 42,
+            body: "hello".into(),
+        })
+        .await
+    {
+        Ok(job) => job,
+        Err(ZizqError::Response { status: 403, .. }) => return, // Pro-only
+        Err(e) => panic!("first enqueue failed: {e:?}"),
+    };
+    assert_eq!(first.duplicate, Some(false));
+
+    // Same user_id, different body → derive's unique key sees only
+    // user_id, so the second enqueue is rejected as a duplicate.
+    let second = client
+        .enqueue(DerivedUnique {
+            user_id: 42,
+            body: "goodbye".into(),
+        })
+        .await
+        .expect("second enqueue");
+    assert_eq!(second.duplicate, Some(true));
+    assert_eq!(second.id, first.id);
+}
+
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(
+    name = "derive.batch",
+    queue = "integration",
+    batch(path = ".events", limit = 100, key(only = [".tenant_id"]))
+)]
+struct DerivedBatch {
+    tenant_id: u64,
+    events: Vec<serde_json::Value>,
+}
+
+#[tokio::test]
+async fn derive_batch_folds_by_only_fields() {
+    let client = fresh().await;
+
+    let first = match client
+        .enqueue(DerivedBatch {
+            tenant_id: 7,
+            events: vec![json!({ "id": 1 })],
+        })
+        .await
+    {
+        Ok(job) => job,
+        Err(ZizqError::Response { status: 403, .. }) => return, // Pro-only
+        Err(e) => panic!("first enqueue failed: {e:?}"),
+    };
+    assert_eq!(first.folded, Some(false));
+
+    // Second enqueue with the same tenant folds into the first.
+    let second = client
+        .enqueue(DerivedBatch {
+            tenant_id: 7,
+            events: vec![json!({ "id": 2 }), json!({ "id": 3 })],
+        })
+        .await
+        .expect("second enqueue");
+    assert_eq!(second.folded, Some(true));
+    assert_eq!(second.id, first.id);
+
+    let fetched = client.get_job(&first.id).await.expect("get_job");
+    assert_eq!(
+        fetched.payload,
+        Some(json!({
+            "tenant_id": 7,
+            "events": [{ "id": 1 }, { "id": 2 }, { "id": 3 }],
+        })),
+    );
+}

@@ -3,7 +3,9 @@
 # Run the Rust client integration tests against a real Zizq server.
 #
 # Usage:
-#   ./run.sh --binary /path/to/zizq --crate /path/to/zizq-0.1.0.crate
+#   ./run.sh --binary /path/to/zizq \
+#            --crate /path/to/zizq-0.1.0.crate \
+#            --macro-crate /path/to/zizq-derive-0.1.0.crate
 #
 # The server is started on a random OS-assigned port (--port 0) and the
 # actual bound address is parsed from its JSON log output. The test
@@ -11,7 +13,11 @@
 # know about server lifecycle.
 #
 # The test runs in an isolated temp directory and builds against the
-# packaged .crate artifact, not the local source tree.
+# packaged `.crate` artifacts, not the local source tree. Both the
+# `zizq` and `zizq-derive` crates are unpacked because `zizq` has an
+# exact-version dependency on `zizq-derive`; the integration crate's
+# manifest points `[patch.crates-io]` at the local unpacked copy of
+# `zizq-derive` so the dep resolves without needing crates.io.
 
 set -euo pipefail
 
@@ -19,19 +25,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 BINARY=""
 CRATE=""
+MACRO_CRATE=""
 LICENSE_KEY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --binary)      BINARY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
         --crate)       CRATE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+        --macro-crate) MACRO_CRATE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
         --license-key) LICENSE_KEY="$2"; shift 2 ;;
         *)             echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
-if [[ -z "$BINARY" || -z "$CRATE" ]]; then
-    echo "Usage: ./run.sh --binary /path/to/zizq --crate /path/to/zizq-x.y.z.crate [--license-key KEY]"
+if [[ -z "$BINARY" || -z "$CRATE" || -z "$MACRO_CRATE" ]]; then
+    echo "Usage: ./run.sh --binary /path/to/zizq \\"
+    echo "                --crate /path/to/zizq-x.y.z.crate \\"
+    echo "                --macro-crate /path/to/zizq-derive-x.y.z.crate \\"
+    echo "                [--license-key KEY]"
     exit 1
 fi
 
@@ -42,6 +53,11 @@ fi
 
 if [[ ! -f "$CRATE" ]]; then
     echo "Error: crate not found: $CRATE"
+    exit 1
+fi
+
+if [[ ! -f "$MACRO_CRATE" ]]; then
+    echo "Error: macro crate not found: $MACRO_CRATE"
     exit 1
 fi
 
@@ -61,18 +77,27 @@ trap cleanup EXIT
 
 echo "==> Setting up integration test (Rust $(rustc --version | awk '{print $2}'))"
 
-# --- Unpack the packaged crate ---
+# --- Unpack the packaged crates ---
 #
-# Extract the .crate (a gzipped tarball) into the work directory and
-# rename it to a fixed `zizq/` path, which the integration crate's
-# manifest depends on via `path = "zizq"`. The tests therefore build
-# against the exact published artifact, not the local source tree.
+# Both `.crate` files (gzipped tarballs) are extracted into the work
+# directory and renamed to fixed `zizq/` and `zizq-derive/` paths.
+# The integration crate's manifest depends on `zizq` via `path =
+# "zizq"` and redirects `zizq-derive` via `[patch.crates-io]` to
+# `./zizq-derive`, so the packaged version-pinned dep resolves
+# locally without needing crates.io.
 
 cp -R "$SCRIPT_DIR/Cargo.toml" "$SCRIPT_DIR/src" "$SCRIPT_DIR/tests" "$WORKDIR/"
 
-echo "    Unpacking crate..."
+echo "    Unpacking crates..."
 tar -xzf "$CRATE" -C "$WORKDIR"
 mv "$WORKDIR"/zizq-*/ "$WORKDIR/zizq"
+
+# The macro crate's tarball has a `zizq-derive-x.y.z/` root — pick
+# it out by exact prefix so we don't accidentally match `zizq-` above.
+MACRO_WORKDIR="$(mktemp -d)"
+tar -xzf "$MACRO_CRATE" -C "$MACRO_WORKDIR"
+mv "$MACRO_WORKDIR"/zizq-derive-*/ "$WORKDIR/zizq-derive"
+rmdir "$MACRO_WORKDIR"
 
 cd "$WORKDIR"
 

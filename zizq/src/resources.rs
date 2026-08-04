@@ -186,7 +186,7 @@ pub struct ErrorPage {
 /// The delay applied before a retry is computed as:
 ///
 /// ```text
-/// t = base_ms + (attempts ** exponent) + (attempts * random() * jitter_ms)
+/// t = base_ms + (attempts ** exponent * 1000) + (attempts * random() * jitter_ms)
 /// ```
 ///
 /// The random jitter spreads out clustered failures so a group of jobs

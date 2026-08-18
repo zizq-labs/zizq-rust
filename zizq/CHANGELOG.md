@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.7.0 (Unreleased)
+
+### Added
+
+- **A group-level cron timezone.** `ReplaceCronBuilder::timezone`
+  sets an IANA timezone on the whole schedule, applied to every entry
+  that does not set its own with `CronEntry::timezone`:
+
+      let group = client
+          .replace_cron("maintenance")
+          .timezone("Australia/Melbourne")
+          .entry(CronEntry::new("cleanup", "0 0 * * *", client.enqueue(Cleanup)))
+          .entry(
+              CronEntry::new("digest", "0 6 * * *", client.enqueue(Digest))
+                  .timezone("UTC"),
+          )
+          .await?;
+
+  With neither set, expressions are evaluated in the server's local
+  timezone, as before.
+
+  It is stored on the server as the group's timezone rather than
+  copied onto each entry, so the new `CronGroup::timezone` field
+  still reports it after a `get_cron`. Because `replace_cron`
+  replaces the group in full, omitting `.timezone(...)` clears
+  whatever the group had.
+
+  Needs Zizq 0.7.0 or newer on the server. Against an older server
+  the field is ignored, and `CronGroup::timezone` is always `None`.
+
+
 ## 0.6.0
 
 ### Added

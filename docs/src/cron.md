@@ -28,7 +28,7 @@ use to enqueue that job directly:
 >     "0 0 * * *",                                    // cron expression
 >     client.enqueue(Cleanup { older_than_days: 30 }), // the job to enqueue
 > )
-> .timezone("Australia/Melbourne")  // optional — defaults to server local time
+> .timezone("Australia/Melbourne")  // optional — overrides the group's
 > # }
 > ```
 
@@ -68,6 +68,50 @@ use to enqueue that job directly:
 `replace_cron` is a *replace*: entries not included are removed, and the group
 is created if it does not yet exist. Awaiting it returns the resulting
 `CronGroup`.
+
+## Timezones
+
+Most schedules run in one timezone throughout, which is what the group's
+`.timezone(...)` is for. It applies to every entry that does not set its own:
+
+> Rust:
+>
+> ```rust
+> # use serde::{Deserialize, Serialize};
+> # use zizq::{Client, CronEntry, JobKind};
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "cleanup")]
+> # struct Cleanup;
+> # #[derive(Serialize, Deserialize, JobKind)]
+> # #[zizq(name = "digest")]
+> # struct Digest;
+> # async fn run(client: &Client) -> Result<(), zizq::ZizqError> {
+> let group = client
+>     .replace_cron("maintenance")
+>     .timezone("Australia/Melbourne")
+>     .entry(CronEntry::new("cleanup", "0 0 * * *", client.enqueue(Cleanup)))
+>     // This one runs at 6am UTC, whatever the group says.
+>     .entry(
+>         CronEntry::new("digest", "0 6 * * *", client.enqueue(Digest))
+>             .timezone("UTC"),
+>     )
+>     .await?;
+> 
+> assert_eq!(group.timezone.as_deref(), Some("Australia/Melbourne"));
+> # Ok(()) }
+> ```
+
+With neither set, expressions are evaluated in the server's local timezone.
+
+The group's timezone is stored on the server as the group's own rather than
+copied onto each entry, so `CronGroup::timezone` still reports it when the
+schedule is read back with `get_cron`. Because `replace_cron` replaces the
+group in full, omitting `.timezone(...)` clears whatever the group had.
+
+> [!NOTE]
+> A group-level timezone requires Zizq 0.7.0 or newer on the server. Against an
+> older server it is ignored, and entries relying on it fall back to the
+> server's local timezone.
 
 ## Single-entry operations
 

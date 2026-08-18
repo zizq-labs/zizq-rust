@@ -82,6 +82,31 @@ async fn get_cron_returns_group_and_entries() {
 }
 
 #[tokio::test]
+async fn get_cron_decodes_the_group_timezone() {
+    let server = MockServer::start().await;
+    let mut group = group_json("nightly", &[("cleanup", "0 0 * * *")]);
+    group["timezone"] = json!("Australia/Melbourne");
+    server.set_response_json(200, group).await;
+
+    let group = json_client(&server.url).get_cron("nightly").await.unwrap();
+    assert_eq!(group.timezone.as_deref(), Some("Australia/Melbourne"));
+    // The entry inherits it rather than carrying a copy.
+    assert_eq!(group.entries[0].timezone, None);
+}
+
+// A pre-0.7.0 server sends no group timezone at all.
+#[tokio::test]
+async fn get_cron_tolerates_a_group_without_a_timezone() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(200, group_json("nightly", &[("cleanup", "0 0 * * *")]))
+        .await;
+
+    let group = json_client(&server.url).get_cron("nightly").await.unwrap();
+    assert_eq!(group.timezone, None);
+}
+
+#[tokio::test]
 async fn replace_cron_sends_entries() {
     let server = MockServer::start().await;
     server
@@ -109,6 +134,85 @@ async fn replace_cron_sends_entries() {
     assert_eq!(body["entries"][0]["job"]["type"], "cleanup");
     assert_eq!(body["entries"][0]["job"]["queue"], "maintenance");
     assert_eq!(body["entries"][0]["job"]["payload"], json!({ "days": 30 }));
+}
+
+// The group's timezone goes on the group, not onto each entry, so a
+// schedule read back still reports which timezone it runs in.
+#[tokio::test]
+async fn replace_cron_sends_group_timezone_on_the_group() {
+    let server = MockServer::start().await;
+    let mut group = group_json("nightly", &[]);
+    group["timezone"] = json!("Australia/Melbourne");
+    server.set_response_json(200, group).await;
+
+    let client = json_client(&server.url);
+    let group = client
+        .replace_cron("nightly")
+        .timezone("Australia/Melbourne")
+        .entry(CronEntry::new(
+            "cleanup",
+            "0 0 * * *",
+            client.enqueue(Cleanup(json!({}))),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(group.timezone.as_deref(), Some("Australia/Melbourne"));
+
+    let req = server.last_request().await;
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(body["timezone"], "Australia/Melbourne");
+    // The entry inherits it rather than carrying a copy.
+    assert!(body["entries"][0].get("timezone").is_none());
+}
+
+#[tokio::test]
+async fn replace_cron_entry_timezone_overrides_the_group() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(200, group_json("nightly", &[]))
+        .await;
+
+    let client = json_client(&server.url);
+    client
+        .replace_cron("nightly")
+        .timezone("Australia/Melbourne")
+        .entry(
+            CronEntry::new("cleanup", "0 0 * * *", client.enqueue(Cleanup(json!({}))))
+                .timezone("UTC"),
+        )
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    assert_eq!(body["timezone"], "Australia/Melbourne");
+    assert_eq!(body["entries"][0]["timezone"], "UTC");
+}
+
+#[tokio::test]
+async fn replace_cron_omits_the_group_timezone_when_unset() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(200, group_json("nightly", &[]))
+        .await;
+
+    let client = json_client(&server.url);
+    let group = client
+        .replace_cron("nightly")
+        .entry(CronEntry::new(
+            "cleanup",
+            "0 0 * * *",
+            client.enqueue(Cleanup(json!({}))),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(group.timezone, None);
+
+    let req = server.last_request().await;
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+    assert!(body.get("timezone").is_none());
 }
 
 #[tokio::test]

@@ -20,6 +20,13 @@
 //! [`CronEntryRecord`] and [`JobTemplate`] are the equivalent types returned
 //! from the server.
 //!
+//! # Timezones
+//!
+//! A group carries a timezone of its own — see
+//! [`ReplaceCronBuilder::timezone`] — which applies to every entry that
+//! does not set one with [`CronEntry::timezone`]. With neither set, the
+//! server evaluates the expression in its own local timezone.
+//!
 //! [`ZizqError::Response`]: crate::ZizqError::Response
 
 use std::future::{Future, IntoFuture};
@@ -92,7 +99,8 @@ pub struct CronEntryRecord {
     pub expression: String,
 
     /// IANA timezone the expression is evaluated in. `None` means the
-    /// server's local timezone.
+    /// group's timezone, or the server's local timezone when the group
+    /// does not specify one either.
     #[serde(default)]
     pub timezone: Option<String>,
 
@@ -127,6 +135,15 @@ pub struct CronGroup {
 
     /// Whether the whole group is paused.
     pub paused: bool,
+
+    /// IANA timezone applied to entries that do not specify one of
+    /// their own. `None` means those entries are evaluated in the
+    /// server's local timezone.
+    ///
+    /// Always `None` from a server older than 0.7.0, which has no
+    /// group-level timezone.
+    #[serde(default)]
+    pub timezone: Option<String>,
 
     /// When the group was last paused, as Unix ms.
     #[serde(default)]
@@ -231,8 +248,13 @@ impl CronEntry {
     }
 
     /// Evaluate the cron expression in the given IANA timezone (e.g.
-    /// `"Australia/Melbourne"`). Defaults to the server's local
-    /// timezone.
+    /// `"Australia/Melbourne"`), overriding the group's timezone for
+    /// this entry.
+    ///
+    /// Left unset, the entry is evaluated in its group's timezone —
+    /// see [`ReplaceCronBuilder::timezone`] — falling back to the
+    /// server's local timezone when the group does not specify one
+    /// either.
     pub fn timezone(mut self, timezone: impl Into<String>) -> Self {
         self.timezone = Some(timezone.into());
         self
@@ -263,6 +285,10 @@ pub(crate) struct ReplaceCronGroupBody {
     /// True if this group is paused.
     #[serde(skip_serializing_if = "Option::is_none")]
     paused: Option<bool>,
+
+    /// Timezone applied to entries that do not specify one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone: Option<String>,
 
     /// List of entries on the schedule.
     entries: Vec<CronEntryBody>,
@@ -305,6 +331,9 @@ pub struct ReplaceCronBuilder<'a> {
     /// True if the group is paused.
     paused: Option<bool>,
 
+    /// Timezone applied to entries that do not specify one.
+    timezone: Option<String>,
+
     /// Accumulated entry bodies, or the first deferred error from a
     /// [`CronEntry`] whose job failed to serialise.
     entries: Result<Vec<CronEntryBody>, ZizqError>,
@@ -316,6 +345,7 @@ impl<'a> ReplaceCronBuilder<'a> {
             client,
             name,
             paused: None,
+            timezone: None,
             entries: Ok(Vec::new()),
         }
     }
@@ -337,6 +367,41 @@ impl<'a> ReplaceCronBuilder<'a> {
         self.paused = Some(paused);
         self
     }
+
+    /// Evaluate every entry that does not specify its own timezone in
+    /// this IANA timezone (e.g. `"Australia/Melbourne"`).
+    ///
+    /// The timezone is stored on the server as the group's, not copied
+    /// onto each entry, so [`CronGroup::timezone`] still reports it
+    /// when the schedule is read back. An entry calling
+    /// [`CronEntry::timezone`] overrides it.
+    ///
+    /// Because this replaces the group in full, omitting it clears
+    /// whatever timezone the group had. Requires server 0.7.0 or
+    /// newer; older servers ignore it and fall back to their local
+    /// timezone.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use serde::{Deserialize, Serialize};
+    /// # use zizq::{Client, CronEntry, JobKind};
+    /// # #[derive(Serialize, Deserialize)]
+    /// # struct Cleanup;
+    /// # impl JobKind for Cleanup { const NAME: &'static str = "cleanup"; }
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let group = client
+    ///     .replace_cron("maintenance")
+    ///     .timezone("Australia/Melbourne")
+    ///     .entry(CronEntry::new("cleanup", "0 0 * * *", client.enqueue(Cleanup)))
+    ///     .await?;
+    /// assert_eq!(group.timezone.as_deref(), Some("Australia/Melbourne"));
+    /// # Ok(()) }
+    /// ```
+    pub fn timezone(mut self, timezone: impl Into<String>) -> Self {
+        self.timezone = Some(timezone.into());
+        self
+    }
 }
 
 impl<'a> IntoFuture for ReplaceCronBuilder<'a> {
@@ -350,6 +415,7 @@ impl<'a> IntoFuture for ReplaceCronBuilder<'a> {
             let entries = self.entries?;
             let body = ReplaceCronGroupBody {
                 paused: self.paused,
+                timezone: self.timezone,
                 entries,
             };
             let url = client.url(&["crons", self.name.as_str()]);

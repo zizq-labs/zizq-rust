@@ -6,7 +6,7 @@ members = ["zizq", "zizq-derive"]
 # in their own `[package]` section. Bumping the version here bumps
 # every member in lockstep — see bump-version.sh.
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -18,4 +18,4 @@ homepage = "https://zizq.io"
 # through the workspace here so bump-version.sh only needs to touch
 # `[workspace.package]` above.
 [workspace.dependencies]
-zizq-derive = { version = "=0.6.0", path = "zizq-derive" }
+zizq-derive = { version = "=0.7.0", path = "zizq-derive" }

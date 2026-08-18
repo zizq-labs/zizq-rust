@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "zizq"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "document-features",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "zizq-derive"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "proc-macro2",
  "quote",

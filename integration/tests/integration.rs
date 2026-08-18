@@ -449,6 +449,78 @@ async fn cron_schedule_lifecycle() {
         .expect("delete_cron");
 }
 
+/// The group's timezone is the group's, not a copy smeared over every
+/// entry, so a re-fetch still reports it and entries that set their own
+/// keep it.
+#[tokio::test]
+async fn cron_group_timezone_round_trips() {
+    let client = fresh().await;
+
+    let group = match client
+        .replace_cron("integration-cron")
+        .timezone("Australia/Melbourne")
+        .entry(CronEntry::new(
+            "inherits",
+            "0 9 * * *",
+            client.enqueue(Alpha(json!({}))),
+        ))
+        .entry(
+            CronEntry::new("scoped", "0 9 * * *", client.enqueue(Beta(json!({}))))
+                .timezone("UTC"),
+        )
+        .await
+    {
+        Ok(group) => group,
+        Err(ZizqError::Response { status: 403, .. }) => return,
+        Err(e) => panic!("replace_cron failed: {e:?}"),
+    };
+    assert_eq!(group.timezone.as_deref(), Some("Australia/Melbourne"));
+
+    let fetched = client.get_cron("integration-cron").await.expect("get_cron");
+    assert_eq!(fetched.timezone.as_deref(), Some("Australia/Melbourne"));
+
+    let entry = |name: &str| {
+        fetched
+            .entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("entry {name} missing"))
+    };
+    assert_eq!(entry("inherits").timezone, None);
+    assert_eq!(entry("scoped").timezone.as_deref(), Some("UTC"));
+
+    // And the group's timezone is what the inheriting entry actually runs
+    // in: 9am in Melbourne is not 9am in UTC.
+    assert_ne!(
+        entry("inherits").next_enqueue_at,
+        entry("scoped").next_enqueue_at
+    );
+
+    // A replace is a full replace, so a timezone left out goes.
+    client
+        .replace_cron("integration-cron")
+        .entry(CronEntry::new(
+            "inherits",
+            "0 9 * * *",
+            client.enqueue(Alpha(json!({}))),
+        ))
+        .await
+        .expect("replace_cron without timezone");
+    assert_eq!(
+        client
+            .get_cron("integration-cron")
+            .await
+            .expect("get_cron")
+            .timezone,
+        None
+    );
+
+    client
+        .delete_cron("integration-cron")
+        .await
+        .expect("delete_cron");
+}
+
 #[tokio::test]
 async fn delete_all_crons_wipes_every_group() {
     let client = fresh().await;

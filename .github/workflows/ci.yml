@@ -6,8 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+# Publishing lives in `release.yml`, so nothing here writes to the repo.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -218,55 +219,3 @@ jobs:
             echo "  Integration: ${{ needs.integration.result }}"
             exit 1
           fi
-
-  publish:
-    name: Publish Release
-    needs: [gate, package]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # Publish both crates in a single `cargo publish` invocation.
-      # Cargo topologically orders the members (`zizq-derive` before
-      # `zizq`) and resolves `zizq`'s version-pinned dep against the
-      # just-uploaded sibling via its own coordination — no explicit
-      # index-lag retry loop needed. Explicit `-p` names (rather
-      # than `--workspace`) keeps this stable if the workspace ever
-      # grows dev-only members.
-      #
-      # This is the irreversible step, so it runs before the steps
-      # below that create `artifacts/` and `release-notes.md` — a
-      # failure leaves nothing else done.
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p zizq-derive -p zizq
-
-      - name: Download package artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: zizq-rust-package
-          path: artifacts
-
-      - name: Extract release notes from CHANGELOG
-        run: |
-          version=${{ needs.package.outputs.version }}
-          sed -n "/^## ${version}/,/^## /p" zizq/CHANGELOG.md | head -n -1 | tail -n +2 > release-notes.md
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version=${{ needs.package.outputs.version }}
-          gh release create "v${version}" \
-            --title "v${version}" \
-            --notes-file release-notes.md \
-            "artifacts/zizq-${version}.crate" \
-            "artifacts/zizq-${version}.crate.sha256" \
-            "artifacts/zizq-derive-${version}.crate" \
-            "artifacts/zizq-derive-${version}.crate.sha256"

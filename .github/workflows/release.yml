@@ -1,0 +1,168 @@
+# Publishing, split out from CI on purpose.
+#
+# A job gated on `environment: release` waits for a reviewer, and GitHub
+# fails that job automatically if nobody approves within 30 days. While
+# publishing lived in `ci.yml` that meant every merge to main left a
+# pending run which eventually failed, turning the README's CI badge red
+# even though every test had passed. The badge tracks `ci.yml`, so
+# moving publishing here keeps it honest: green means the tests pass.
+#
+# Releasing is now a deliberate act rather than something queued by each
+# merge. `cargo publish` builds from the source tree, so the checkout
+# below pins the exact commit CI tested rather than main's HEAD.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: >-
+          CI run to release from. Leave blank for the most recent
+          successful run on main.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  # Needed to read the artifacts of another workflow's run.
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Resolve the CI run
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REQUESTED: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$REQUESTED" ]; then
+            run_id="$REQUESTED"
+          else
+            run_id="$(gh run list --repo "$REPO" \
+                        --workflow ci.yml --branch main \
+                        --status success --limit 1 \
+                        --json databaseId --jq '.[0].databaseId')"
+            if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+              echo "No successful CI run found on main." >&2
+              exit 1
+            fi
+            echo "Using the latest successful CI run on main."
+          fi
+
+          read -r conclusion head_sha head_branch < <(
+            gh run view "$run_id" --repo "$REPO" \
+              --json conclusion,headSha,headBranch \
+              --jq '[.conclusion, .headSha, .headBranch] | @tsv'
+          )
+
+          if [ "$conclusion" != "success" ]; then
+            echo "CI run $run_id concluded '$conclusion', refusing to release from it." >&2
+            exit 1
+          fi
+
+          if [ "$head_branch" != "main" ]; then
+            echo "CI run $run_id is from '$head_branch', not main." >&2
+            exit 1
+          fi
+
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "Releasing from CI run $run_id ($head_sha)."
+
+      # The commit CI tested. `cargo publish` packages from this tree,
+      # so this is what actually reaches crates.io.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.ci.outputs.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download the package built by that run
+        uses: actions/download-artifact@v8
+        with:
+          name: zizq-rust-package
+          path: artifacts
+          run-id: ${{ steps.ci.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # Read back from the artifact rather than recomputed. The glob
+      # excludes `zizq-derive-*`, which shares the prefix.
+      - name: Read the packaged version
+        id: version
+        run: |
+          set -euo pipefail
+          crate="$(ls artifacts/zizq-*.crate | grep -v -- '-derive-' | head -1)"
+          version="$(basename "$crate" .crate | sed 's/^zizq-//')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing zizq $version"
+
+      - name: Refuse to release a version that already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+
+          if gh release view "v${version}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release v${version} already exists. Bump the version first." >&2
+            exit 1
+          fi
+
+          if curl -sf -H 'User-Agent: zizq-release' \
+               "https://crates.io/api/v1/crates/zizq/${version}" >/dev/null; then
+            echo "zizq ${version} is already on crates.io." >&2
+            exit 1
+          fi
+
+      # Publish both crates in a single `cargo publish` invocation.
+      # Cargo topologically orders the members (`zizq-derive` before
+      # `zizq`) and resolves `zizq`'s version-pinned dep against the
+      # just-uploaded sibling via its own coordination — no explicit
+      # index-lag retry loop needed. Explicit `-p` names (rather
+      # than `--workspace`) keeps this stable if the workspace ever
+      # grows dev-only members.
+      #
+      # This is the irreversible step, so it runs before the GitHub
+      # Release below — a failure leaves nothing else done.
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p zizq-derive -p zizq
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          sed -n "/^## ${version}/,/^## /p" zizq/CHANGELOG.md | head -n -1 | tail -n +2 > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG section found for ${version}." >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          gh release create "v${version}" \
+            --target "${{ steps.ci.outputs.sha }}" \
+            --title "v${version}" \
+            --notes-file release-notes.md \
+            "artifacts/zizq-${version}.crate" \
+            "artifacts/zizq-${version}.crate.sha256" \
+            "artifacts/zizq-derive-${version}.crate" \
+            "artifacts/zizq-derive-${version}.crate.sha256"

@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;
 
-use crate::budget::{Budget, BudgetPatch, BudgetPolicy, ListBudgetsResponse};
+use crate::budget::{Budget, BudgetBindingInput, BudgetPatch, BudgetPolicy, ListBudgetsResponse};
 use crate::bulk_enqueue::BulkEnqueueBuilder;
 use crate::count_jobs::CountJobsBuilder;
 use crate::cron::{CronEntry, CronEntryRecord, CronGroup, ReplaceCronBuilder};
@@ -1637,6 +1637,11 @@ pub(crate) struct EnqueueRequest {
     /// Optional batched-job configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) batch: Option<crate::batch::BatchConfig>,
+
+    /// Budgets this job draws on. Empty is the common case, and is
+    /// omitted rather than sent as `[]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) budgets: Vec<BudgetBindingInput>,
 }
 
 /// Raw API format body for reporting a job failure.

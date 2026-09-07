@@ -421,6 +421,7 @@ mod tests {
             duplicate: None,
             folded: None,
             batch: None,
+            budgets: Vec::new(),
         }
     }
 

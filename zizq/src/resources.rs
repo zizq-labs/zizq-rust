@@ -7,6 +7,7 @@
 use serde::Deserialize;
 
 use crate::batch::BatchConfig;
+use crate::budget::BudgetBinding;
 use crate::unique_key::{UniqueKey, UniqueScope};
 
 /// The lifecycle state of a job on the server.
@@ -305,6 +306,10 @@ pub struct Job {
     /// the batch, so reading this back tells you exactly what the
     /// server is evaluating on subsequent folds.
     pub batch: Option<BatchConfig>,
+
+    /// Budgets this job draws on, each with the cost it debits when
+    /// the job is dispatched. Empty when the job is unthrottled.
+    pub budgets: Vec<BudgetBinding>,
 }
 
 // Raw shape of a Job as returned by the API. Flat `unique_key` /
@@ -385,6 +390,10 @@ struct JobFromApi {
     /// Batched-job configuration stored on this job.
     #[serde(default)]
     batch: Option<BatchConfig>,
+
+    /// Budgets this job draws on.
+    #[serde(default)]
+    budgets: Vec<BudgetBinding>,
 }
 
 impl From<JobFromApi> for Job {
@@ -414,6 +423,7 @@ impl From<JobFromApi> for Job {
             duplicate: w.duplicate,
             folded: w.folded,
             batch: w.batch,
+            budgets: w.budgets,
         }
     }
 }

@@ -34,6 +34,7 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::BudgetBinding;
 use crate::client::{Client, EnqueueRequest};
 use crate::enqueue::EnqueueBuilder;
 use crate::error::ZizqError;
@@ -86,6 +87,15 @@ pub struct JobTemplate {
     /// Lifecycle scope the `unique_key` applies for, if any.
     #[serde(default)]
     pub unique_while: Option<UniqueScope>,
+
+    /// Budgets each enqueued job draws on.
+    ///
+    /// A binding's `create_with` policy is not reported back: it is
+    /// consumed when the entry fires, and echoing it would suggest the
+    /// budget's policy is whatever the template asked for rather than
+    /// whatever the server currently holds.
+    #[serde(default)]
+    pub budgets: Vec<BudgetBinding>,
 }
 
 /// A cron entry as returned by the server — the definition plus

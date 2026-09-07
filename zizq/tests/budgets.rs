@@ -6,8 +6,12 @@ mod common;
 use std::time::Duration;
 
 use common::MockServer;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use zizq::{BudgetPatch, BudgetPolicy, BudgetStrategy, Client, Format};
+use zizq::{
+    BudgetBinding, BudgetBindingInput, BudgetPatch, BudgetPolicy, BudgetStrategy, Client,
+    CronEntry, Format, JobKind,
+};
 
 fn json_client(url: &str) -> Client {
     Client::builder()
@@ -383,5 +387,306 @@ async fn a_budget_round_trips_through_messagepack() {
             duration: Duration::from_secs(60),
             burst: Some(5),
         }
+    );
+}
+
+// --- Binding jobs to budgets ------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SendEmail {
+    to: String,
+}
+
+impl JobKind for SendEmail {
+    const NAME: &'static str = "send_email";
+    const QUEUE: &'static str = "emails";
+}
+
+/// A type that declares its budgets as a per-type default, including
+/// one that creates its budget on first use.
+#[derive(Debug, Serialize, Deserialize)]
+struct ChargeCard {
+    invoice_id: String,
+}
+
+impl JobKind for ChargeCard {
+    const NAME: &'static str = "charge_card";
+    const QUEUE: &'static str = "billing";
+    const BUDGETS: &'static [BudgetBindingInput] = &[
+        BudgetBindingInput::new("stripe").cost(2),
+        BudgetBindingInput::with_policy(
+            "notifications",
+            BudgetPolicy::new(3, BudgetStrategy::WhileInFlight),
+        ),
+    ];
+}
+
+fn job_response() -> serde_json::Value {
+    json!({
+        "id": "job-1",
+        "type": "send_email",
+        "queue": "emails",
+        "status": "ready",
+        "priority": 50,
+        "ready_at": 0,
+        "attempts": 0,
+    })
+}
+
+#[tokio::test]
+async fn an_unbudgeted_job_omits_the_field_entirely() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(SendEmail { to: "a@b".into() })
+        .await
+        .unwrap();
+
+    assert_eq!(body_of(&server).await.get("budgets"), None);
+}
+
+#[tokio::test]
+async fn budget_binds_by_key_alone() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(SendEmail { to: "a@b".into() })
+        .budget("emails")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([{ "key": "emails" }])
+    );
+}
+
+#[tokio::test]
+async fn repeated_budget_calls_accumulate() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(SendEmail { to: "a@b".into() })
+        .budget("emails")
+        .budget(BudgetBindingInput::new("stripe").cost(2))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([{ "key": "emails" }, { "key": "stripe", "cost": 2 }])
+    );
+}
+
+#[tokio::test]
+async fn a_binding_can_create_its_budget_atomically() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::time_based(Duration::from_secs(60)));
+    json_client(&server.url)
+        .enqueue(SendEmail { to: "a@b".into() })
+        .budget(
+            BudgetBindingInput::new("emails")
+                .cost(2)
+                .create_with(policy),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([{
+            "key": "emails",
+            "cost": 2,
+            "create_with": {
+                "allocation": 100,
+                "strategy": { "type": "time_based", "duration_ms": 60_000 },
+            },
+        }])
+    );
+}
+
+// A key that isn't known until runtime is the reason the binding's key
+// is a `Cow` rather than a `&'static str`.
+#[tokio::test]
+async fn a_binding_accepts_a_key_computed_at_runtime() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    let tenant = format!("emails:{}", "acme");
+    json_client(&server.url)
+        .enqueue(SendEmail { to: "a@b".into() })
+        .budget(tenant)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([{ "key": "emails:acme" }])
+    );
+}
+
+#[tokio::test]
+async fn the_type_default_applies_when_the_call_site_is_silent() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(ChargeCard {
+            invoice_id: "inv-1".into(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([
+            { "key": "stripe", "cost": 2 },
+            {
+                "key": "notifications",
+                "create_with": {
+                    "allocation": 3,
+                    "strategy": { "type": "while_in_flight" },
+                },
+            },
+        ])
+    );
+}
+
+// Every other per-type default is replaced rather than merged when the
+// call site sets one, and budgets follow that rule.
+#[tokio::test]
+async fn a_call_site_budget_replaces_the_type_default() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(ChargeCard {
+            invoice_id: "inv-1".into(),
+        })
+        .budget("urgent")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([{ "key": "urgent" }])
+    );
+}
+
+#[tokio::test]
+async fn budgets_sets_the_whole_list_at_once() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(ChargeCard {
+            invoice_id: "inv-1".into(),
+        })
+        .budget("dropped")
+        .budgets(["a", "b"])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["budgets"],
+        json!([{ "key": "a" }, { "key": "b" }])
+    );
+}
+
+#[tokio::test]
+async fn clear_budgets_enqueues_a_budgeted_type_unthrottled() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .enqueue(ChargeCard {
+            invoice_id: "inv-1".into(),
+        })
+        .clear_budgets()
+        .await
+        .unwrap();
+
+    assert_eq!(body_of(&server).await.get("budgets"), None);
+}
+
+#[tokio::test]
+async fn a_job_reports_what_it_is_bound_to() {
+    let server = MockServer::start().await;
+    let mut response = job_response();
+    response["budgets"] = json!([
+        { "key": "emails", "cost": 2 },
+        { "key": "stripe", "cost": 1 },
+    ]);
+    server.set_response_json(200, response).await;
+
+    let job = json_client(&server.url).get_job("job-1").await.unwrap();
+
+    assert_eq!(
+        job.budgets,
+        vec![
+            BudgetBinding {
+                key: "emails".into(),
+                cost: 2
+            },
+            BudgetBinding {
+                key: "stripe".into(),
+                cost: 1
+            },
+        ]
+    );
+}
+
+// A pre-0.7.0 server sends no `budgets` field at all.
+#[tokio::test]
+async fn a_job_from_an_older_server_reports_no_budgets() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    let job = json_client(&server.url).get_job("job-1").await.unwrap();
+
+    assert!(job.budgets.is_empty());
+}
+
+// A cron entry's job is an enqueue input, so budgets ride along.
+#[tokio::test]
+async fn a_cron_entry_carries_its_jobs_budgets() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(
+            200,
+            json!({ "name": "billing", "paused": false, "entries": [] }),
+        )
+        .await;
+
+    let client = json_client(&server.url);
+    client
+        .replace_cron("billing")
+        .entry(CronEntry::new(
+            "charge",
+            "0 * * * *",
+            client.enqueue(ChargeCard {
+                invoice_id: "inv-1".into(),
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await["entries"][0]["job"]["budgets"],
+        json!([
+            { "key": "stripe", "cost": 2 },
+            {
+                "key": "notifications",
+                "create_with": {
+                    "allocation": 3,
+                    "strategy": { "type": "while_in_flight" },
+                },
+            },
+        ])
     );
 }

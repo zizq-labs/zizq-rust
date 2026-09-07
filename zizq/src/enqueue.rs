@@ -21,6 +21,7 @@ use serde::{Serialize, Serializer};
 use time::OffsetDateTime;
 
 use crate::batch::BatchConfig;
+use crate::budget::BudgetBindingInput;
 use crate::client::{Client, EnqueueRequest};
 use crate::error::ZizqError;
 use crate::job::JobKind;
@@ -93,6 +94,11 @@ pub struct EnqueueBuilder<'a, T> {
 
     /// Optional batched-job configuration for this job.
     batch: Option<BatchConfig>,
+
+    /// Budgets this job draws on. `None` defers to
+    /// [`JobKind::BUDGETS`]; `Some` overrides it, including with an
+    /// empty list.
+    budgets: Option<Vec<BudgetBindingInput>>,
 }
 
 impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
@@ -165,6 +171,50 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
         self
     }
 
+    /// Bind this job to a budget, so the server will not dispatch it
+    /// until it can debit the budget's cost.
+    ///
+    /// Requires a [Pro license](https://zizq.io/pricing) on the server.
+    ///
+    /// The first call replaces [`JobKind::BUDGETS`]; further calls add
+    /// to what this builder has accumulated. A job bound to several
+    /// budgets must satisfy every one of them before it is dispatched.
+    ///
+    /// ```no_run
+    /// # use zizq::{BudgetBindingInput, Client, JobKind};
+    /// # async fn run<T: JobKind>(client: &Client, job: T) -> Result<(), Box<dyn std::error::Error>> {
+    /// client
+    ///     .enqueue(job)
+    ///     .budget("emails")
+    ///     .budget(BudgetBindingInput::new("stripe").cost(2))
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn budget(mut self, budget: impl Into<BudgetBindingInput>) -> Self {
+        self.budgets.get_or_insert_default().push(budget.into());
+        self
+    }
+
+    /// Bind this job to exactly these budgets, replacing
+    /// [`JobKind::BUDGETS`] and anything
+    /// [`budget`](Self::budget) has already added.
+    pub fn budgets(
+        mut self,
+        budgets: impl IntoIterator<Item = impl Into<BudgetBindingInput>>,
+    ) -> Self {
+        self.budgets = Some(budgets.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Enqueue this job unthrottled, ignoring [`JobKind::BUDGETS`].
+    ///
+    /// The escape hatch for a job that must not wait behind its type's
+    /// usual limits.
+    pub fn clear_budgets(mut self) -> Self {
+        self.budgets = Some(Vec::new());
+        self
+    }
+
     /// Initialize a new `EnqueueBuilder` for the given `Client` and `JobKind`.
     pub(crate) fn new(client: &'a Client, payload: T) -> Self {
         Self {
@@ -178,6 +228,7 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             retention: None,
             unique_key: None,
             batch: None,
+            budgets: None,
         }
     }
 
@@ -224,6 +275,7 @@ impl<'a, T: JobKind> EnqueueBuilder<'a, T> {
             unique_key: unique_key_str,
             unique_while: unique_scope,
             batch,
+            budgets: self.budgets.unwrap_or_else(|| T::BUDGETS.to_vec()),
         })
     }
 }
@@ -468,6 +520,7 @@ mod tests {
             unique_key: None,
             unique_while: None,
             batch: None,
+            budgets: Vec::new(),
         };
 
         let json: serde_json::Value =
@@ -495,6 +548,7 @@ mod tests {
             unique_key: None,
             unique_while: None,
             batch: None,
+            budgets: Vec::new(),
         };
 
         let json: serde_json::Value =
@@ -528,6 +582,7 @@ mod tests {
             unique_key: None,
             unique_while: None,
             batch: None,
+            budgets: Vec::new(),
         };
 
         let json: serde_json::Value =
@@ -599,6 +654,7 @@ mod tests {
             unique_key: None,
             unique_while: None,
             batch: None,
+            budgets: Vec::new(),
         };
 
         // MessagePack: server-side path. Decode as Value to mirror
@@ -635,6 +691,7 @@ mod tests {
             unique_key: None,
             unique_while: None,
             batch: None,
+            budgets: Vec::new(),
         };
         let json: serde_json::Value =
             serde_json::from_slice(&encode_body(&body, Format::Json).unwrap()).unwrap();
@@ -655,6 +712,7 @@ mod tests {
             unique_key: Some("user:42".to_string()),
             unique_while: Some(UniqueScope::Exists),
             batch: None,
+            budgets: Vec::new(),
         };
 
         let json: serde_json::Value =
@@ -682,6 +740,7 @@ mod tests {
                 when: "$existing.n < 100".into(),
                 fold: "$existing | .n += 1".into(),
             }),
+            budgets: Vec::new(),
         };
 
         let json: serde_json::Value =

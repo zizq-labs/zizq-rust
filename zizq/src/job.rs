@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::batch::BatchConfig;
+use crate::budget::BudgetBindingInput;
 use crate::resources::{BackoffConfig, RetentionConfig};
 use crate::unique_key::UniqueKey;
 
@@ -104,6 +105,43 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + 'static {
     /// Default retention configuration used when none is specified at
     /// the call site. When set to `None` the server’s default applies.
     const RETENTION: Option<RetentionConfig> = None;
+
+    /// Budgets every job of this type draws on, unless the call site
+    /// says otherwise.
+    ///
+    /// Requires a [Pro license](https://zizq.io/pricing) on the server.
+    ///
+    /// Setting any budget on the [`EnqueueBuilder`] replaces this list
+    /// wholesale rather than adding to it, the same as every other
+    /// per-type default.
+    ///
+    /// [`BudgetBindingInput`]'s constructors are `const`, so a binding
+    /// that creates its budget on first use can be declared here too
+    /// and the application never needs a startup call at all.
+    ///
+    /// ```
+    /// use serde::{Deserialize, Serialize};
+    /// use zizq::{BudgetBindingInput, BudgetPolicy, BudgetStrategy, JobKind};
+    ///
+    /// #[derive(Serialize, Deserialize)]
+    /// struct ChargeCard {
+    ///     invoice_id: String,
+    /// }
+    ///
+    /// impl JobKind for ChargeCard {
+    ///     const NAME: &'static str = "charge_card";
+    ///     const QUEUE: &'static str = "billing";
+    ///     const BUDGETS: &'static [BudgetBindingInput] = &[
+    ///         BudgetBindingInput::with_policy(
+    ///             "stripe",
+    ///             BudgetPolicy::new(3, BudgetStrategy::WhileInFlight),
+    ///         ),
+    ///     ];
+    /// }
+    /// ```
+    ///
+    /// [`EnqueueBuilder`]: crate::EnqueueBuilder
+    const BUDGETS: &'static [BudgetBindingInput] = &[];
 
     /// Derive a uniqueness key from this payload.
     ///

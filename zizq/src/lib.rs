@@ -111,6 +111,7 @@
 
 mod batch;
 mod budget;
+mod budget_jobs;
 mod bulk_enqueue;
 mod client;
 mod count_jobs;
@@ -142,6 +143,7 @@ pub use budget::{
     Budget, BudgetBinding, BudgetBindingInput, BudgetChange, BudgetPatch, BudgetPolicy,
     BudgetStrategy,
 };
+pub use budget_jobs::BudgetJobsBuilder;
 pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};
 pub use count_jobs::CountJobsBuilder;

@@ -16,7 +16,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;
 
-use crate::budget::{Budget, BudgetBindingInput, BudgetPatch, BudgetPolicy, ListBudgetsResponse};
+use crate::budget::{
+    BindingBody, Budget, BudgetBindingInput, BudgetPatch, BudgetPolicy, BudgetsBody, CostBody,
+    ListBudgetsResponse,
+};
+use crate::budget_jobs::BudgetJobsBuilder;
 use crate::bulk_enqueue::BulkEnqueueBuilder;
 use crate::count_jobs::CountJobsBuilder;
 use crate::cron::{CronEntry, CronEntryRecord, CronGroup, ReplaceCronBuilder};
@@ -811,6 +815,171 @@ impl Client {
         let response = self.send(reqwest::Method::DELETE, url, None).await?;
         self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
             .await
+    }
+
+    /// Bind an already-enqueued job to a budget, returning the updated
+    /// job.
+    ///
+    /// Bindings stay mutable after the enqueue, which is what makes it
+    /// possible to split one shared budget in two, or to retune a
+    /// limit during an incident, without re-enqueueing anything.
+    ///
+    /// A job already drawing on that budget surfaces as
+    /// [`ZizqError::Response`] with `status: 409`; use
+    /// [`Client::rebind_budget`] to replace the binding instead.
+    ///
+    /// Only queued (`scheduled`, `ready`) jobs can be rebound — an
+    /// in-flight job has already debited its tokens, and a job in a
+    /// terminal status is immutable. Either surfaces as `status: 422`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{BudgetBindingInput, Client};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let job = client
+    ///     .bind_budget("01K9...", BudgetBindingInput::new("emails").cost(2))
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn bind_budget(
+        &self,
+        id: &str,
+        binding: impl Into<BudgetBindingInput>,
+    ) -> Result<Job, ZizqError> {
+        self.send_binding(reqwest::Method::POST, id, binding.into())
+            .await
+    }
+
+    /// Bind a job to a budget, replacing any binding it already has to
+    /// that budget rather than refusing.
+    ///
+    /// The idempotent counterpart to [`Client::bind_budget`].
+    pub async fn rebind_budget(
+        &self,
+        id: &str,
+        binding: impl Into<BudgetBindingInput>,
+    ) -> Result<Job, ZizqError> {
+        self.send_binding(reqwest::Method::PUT, id, binding.into())
+            .await
+    }
+
+    /// Change what one job debits from a budget it is already bound
+    /// to.
+    pub async fn set_budget_cost(&self, id: &str, key: &str, cost: u32) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id, "budgets", key]);
+        self.send_body_decoded(reqwest::Method::PATCH, url, CostBody { cost })
+            .await
+    }
+
+    /// Release a job from one budget.
+    pub async fn unbind_budget(&self, id: &str, key: &str) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id, "budgets", key]);
+        self.delete_decoded(url).await
+    }
+
+    /// Release a job from every budget it draws on, leaving it
+    /// unthrottled.
+    pub async fn unbind_all_budgets(&self, id: &str) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id, "budgets"]);
+        self.delete_decoded(url).await
+    }
+
+    /// Replace the complete set of budgets a job draws on.
+    ///
+    /// Bindings absent from `budgets` are removed. An empty iterator
+    /// is equivalent to [`Client::unbind_all_budgets`].
+    pub async fn replace_budgets(
+        &self,
+        id: &str,
+        budgets: impl IntoIterator<Item = impl Into<BudgetBindingInput>>,
+    ) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id, "budgets"]);
+        let body = BudgetsBody {
+            budgets: budgets.into_iter().map(Into::into).collect(),
+        };
+        self.send_body_decoded(reqwest::Method::PUT, url, body)
+            .await
+    }
+
+    /// Shared transport for the two single-binding write methods,
+    /// which differ only by HTTP method.
+    async fn send_binding(
+        &self,
+        method: reqwest::Method,
+        id: &str,
+        binding: BudgetBindingInput,
+    ) -> Result<Job, ZizqError> {
+        let url = self.url(&["jobs", id, "budgets", &binding.key]);
+        self.send_body_decoded(method, url, BindingBody::from(&binding))
+            .await
+    }
+
+    /// Bind every job matching the filters to a budget.
+    ///
+    /// Returns a [`BudgetJobsBuilder`]; chain filter methods, then
+    /// `.await` for a [`BudgetChange`] reporting how many jobs changed
+    /// and which were in flight and so could not be.
+    ///
+    /// **With no filters set this binds every job on the server.**
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{BudgetBindingInput, Client};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let change = client
+    ///     .bind_all_jobs_budget(BudgetBindingInput::new("stripe").cost(2))
+    ///     .queue(["billing"])
+    ///     .await?;
+    ///
+    /// println!("{} changed, {} in flight", change.changed, change.blocked.len());
+    /// # Ok(()) }
+    /// ```
+    pub fn bind_all_jobs_budget(
+        &self,
+        binding: impl Into<BudgetBindingInput>,
+    ) -> BudgetJobsBuilder<'_> {
+        BudgetJobsBuilder::bind(self, binding.into())
+    }
+
+    /// Bind every job matching the filters to a budget, replacing any
+    /// binding they already have to it rather than refusing.
+    pub fn rebind_all_jobs_budget(
+        &self,
+        binding: impl Into<BudgetBindingInput>,
+    ) -> BudgetJobsBuilder<'_> {
+        BudgetJobsBuilder::rebind(self, binding.into())
+    }
+
+    /// Change what every job matching the filters debits from a budget
+    /// it is already bound to.
+    pub fn set_all_jobs_budget_cost(&self, key: &str, cost: u32) -> BudgetJobsBuilder<'_> {
+        BudgetJobsBuilder::set_cost(self, key.to_string(), cost)
+    }
+
+    /// Release every job matching the filters from a single budget.
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// client.unbind_all_jobs_budget("emails").budgets_key(["emails"]).await?;
+    /// client.delete_budget("emails").await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn unbind_all_jobs_budget(&self, key: &str) -> BudgetJobsBuilder<'_> {
+        BudgetJobsBuilder::unbind(self, key.to_string())
+    }
+
+    /// Release every job matching the filters from *every* budget it
+    /// draws on.
+    ///
+    /// Named differently from [`Client::unbind_all_jobs_budget`]
+    /// intentionally: the two differ enormously in blast radius.
+    ///
+    /// **With no filters set this unbinds every job on the server.**
+    pub fn clear_all_jobs_budgets(&self) -> BudgetJobsBuilder<'_> {
+        BudgetJobsBuilder::clear(self)
     }
 
     /// Begin a bulk `PATCH /jobs`. Returns a [`PatchJobsBuilder`]

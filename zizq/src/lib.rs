@@ -110,6 +110,7 @@
 #![doc = document_features::document_features!()]
 
 mod batch;
+mod budget;
 mod bulk_enqueue;
 mod client;
 mod count_jobs;
@@ -137,6 +138,9 @@ mod unique_key;
 mod worker;
 
 pub use batch::BatchConfig;
+pub use budget::{
+    Budget, BudgetBinding, BudgetBindingInput, BudgetChange, BudgetPolicy, BudgetStrategy,
+};
 pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};
 pub use count_jobs::CountJobsBuilder;

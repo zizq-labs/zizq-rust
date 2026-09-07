@@ -30,6 +30,27 @@
   Needs Zizq 0.7.0 or newer on the server. Against an older server
   the field is ignored, and `CronGroup::timezone` is always `None`.
 
+- **Predicates on `ZizqError`** for classifying a failure without
+  matching on status codes by hand:
+
+      if let Err(e) = client.enqueue(SendEmail { .. }).await {
+          if e.is_retryable() {
+              // transport failure or 5xx — worth sending again
+          }
+          return Err(e);
+      }
+
+  `status`, `is_not_found`, `is_conflict`, `is_forbidden`,
+  `is_invalid_request`, `is_unsupported_format`, `is_client_error`,
+  `is_server_error`, `is_transport` and `is_retryable`.
+
+  Every server rejection remains the single `ZizqError::Response`
+  variant, so this is purely additive — existing matches on
+  `Response { status, .. }` keep working. `is_retryable` names the
+  policy the worker already applies to acknowledgements, and matches
+  the other clients: transport failures and 5xx are transient,
+  everything else is permanent.
+
 
 ## 0.6.0
 

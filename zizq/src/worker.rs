@@ -305,8 +305,8 @@ impl Worker {
                     backoff = INITIAL_BACKOFF;
                     s
                 }
-                Err(ZizqError::Response { status, message }) if (400..500).contains(&status) => {
-                    return (None, Err(ZizqError::Response { status, message }));
+                Err(e) if e.is_client_error() => {
+                    return (None, Err(e));
                 }
                 Err(e) => {
                     if !self.reconnect {
@@ -632,11 +632,9 @@ async fn handle_job(
                     .error_type(handler_err.type_name);
                 match req.await {
                     Ok(_) => break,
-                    Err(ZizqError::Response { status, message })
-                        if (400..500).contains(&status) =>
-                    {
+                    Err(e) if e.is_client_error() => {
                         log::error!(
-                            "zizq: failure report for {job_id} rejected as 4xx ({status}): {message}; dropping"
+                            "zizq: failure report for {job_id} rejected as 4xx ({e}); dropping"
                         );
                         break;
                     }
@@ -676,9 +674,9 @@ async fn ack_processor(client: Client, mut rx: mpsc::Receiver<String>) {
         loop {
             match client.report_success_bulk(batch.clone()).await {
                 Ok(()) => break,
-                Err(ZizqError::Response { status, message }) if (400..500).contains(&status) => {
+                Err(e) if e.is_client_error() => {
                     log::error!(
-                        "zizq: bulk ack rejected as 4xx ({status}): {message}; dropping batch of {} ids",
+                        "zizq: bulk ack rejected as 4xx ({e}); dropping batch of {} ids",
                         batch.len()
                     );
                     break;

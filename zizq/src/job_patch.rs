@@ -29,7 +29,7 @@ use crate::resources::BackoffConfig;
 ///
 /// See the [module docs](self) for the keep / clear / set model.
 #[derive(Debug, Clone, Default)]
-enum Field<T> {
+pub(crate) enum Field<T> {
     /// Absent from the request body — leave the field unchanged.
     #[default]
     Keep,
@@ -44,7 +44,7 @@ enum Field<T> {
 impl<T> Field<T> {
     /// True for [`Field::Keep`]. Used as the struct fields'
     /// `skip_serializing_if` predicate so a kept field emits nothing.
-    fn is_keep(&self) -> bool {
+    pub(crate) fn is_keep(&self) -> bool {
         matches!(self, Field::Keep)
     }
 }

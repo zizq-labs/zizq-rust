@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use url::Url;
 
+use crate::budget::{Budget, BudgetPatch, BudgetPolicy, ListBudgetsResponse};
 use crate::bulk_enqueue::BulkEnqueueBuilder;
 use crate::count_jobs::CountJobsBuilder;
 use crate::cron::{CronEntry, CronEntryRecord, CronGroup, ReplaceCronBuilder};
@@ -694,6 +695,122 @@ impl Client {
     /// Alias for [`Client::reset`].
     pub async fn erase_all_data(&self) -> Result<(), ZizqError> {
         self.reset().await
+    }
+
+    /// List every budget, each with its current policy.
+    ///
+    /// Calls made against a server without a Pro license surface as
+    /// [`ZizqError::Response`] with `status: 403`, for which
+    /// [`ZizqError::is_forbidden`] returns `true`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::Client;
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// for budget in client.list_budgets().await? {
+    ///     println!("{} allocates {}", budget.key, budget.allocation);
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn list_budgets(&self) -> Result<Vec<Budget>, ZizqError> {
+        let url = self.url(&["budgets"]);
+        let response: ListBudgetsResponse = self.get_decoded(url).await?;
+        Ok(response.budgets)
+    }
+
+    /// Fetch one budget by key.
+    ///
+    /// A budget that doesn't exist surfaces as [`ZizqError::Response`]
+    /// with `status: 404` — see [`ZizqError::is_not_found`].
+    pub async fn get_budget(&self, key: &str) -> Result<Budget, ZizqError> {
+        let url = self.url(&["budgets", key]);
+        self.get_decoded(url).await
+    }
+
+    /// Create a budget, failing if the key is already taken.
+    ///
+    /// The refusal is deliberate, and makes this the method to call on
+    /// startup: every instance of an application can declare the same
+    /// budgets without coordinating, and the ones that lose the race
+    /// treat the conflict as success. The stored policy is left alone,
+    /// so a redeploy will not silently replace a budget.
+    ///
+    /// An existing key surfaces as [`ZizqError::Response`] with
+    /// `status: 409` — see [`ZizqError::is_conflict`]. Use
+    /// [`Client::put_budget`] to overwrite instead.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use zizq::{BudgetPolicy, BudgetStrategy, Client};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let policy = BudgetPolicy::new(10_000, BudgetStrategy::time_based(Duration::from_secs(3600)));
+    ///
+    /// if let Err(e) = client.create_budget("image-service", policy).await {
+    ///     // Another instance got there first, which is the point.
+    ///     if !e.is_conflict() {
+    ///         return Err(e.into());
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn create_budget(
+        &self,
+        key: &str,
+        policy: BudgetPolicy,
+    ) -> Result<Budget, ZizqError> {
+        let url = self.url(&["budgets", key]);
+        self.send_body_decoded(reqwest::Method::POST, url, policy)
+            .await
+    }
+
+    /// Create a budget, replacing any policy already stored under the
+    /// key.
+    ///
+    /// A replace changes the policy, not the budget's identity, so
+    /// [`Budget::created_at`] survives it.
+    ///
+    /// The server refuses a policy that would strand a job already
+    /// bound to the budget — one whose cost no longer fits the
+    /// capacity — with `status: 422`.
+    pub async fn put_budget(&self, key: &str, policy: BudgetPolicy) -> Result<Budget, ZizqError> {
+        let url = self.url(&["budgets", key]);
+        self.send_body_decoded(reqwest::Method::PUT, url, policy)
+            .await
+    }
+
+    /// Apply a [`BudgetPatch`] to an existing budget.
+    ///
+    /// A merge patch, so one field within the strategy can be changed
+    /// without restating the others.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use zizq::{BudgetPatch, Client};
+    /// # async fn run(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let budget = client
+    ///     .update_budget("image-service", BudgetPatch::new().burst(500))
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn update_budget(&self, key: &str, patch: BudgetPatch) -> Result<Budget, ZizqError> {
+        let url = self.url(&["budgets", key]);
+        self.send_body_decoded(reqwest::Method::PATCH, url, patch)
+            .await
+    }
+
+    /// Delete a budget.
+    ///
+    /// The server refuses while any job is still bound to it, with
+    /// `status: 422`.
+    pub async fn delete_budget(&self, key: &str) -> Result<(), ZizqError> {
+        let url = self.url(&["budgets", key]);
+        let response = self.send(reqwest::Method::DELETE, url, None).await?;
+        self.expect_status(response, &[reqwest::StatusCode::NO_CONTENT])
+            .await
     }
 
     /// Begin a bulk `PATCH /jobs`. Returns a [`PatchJobsBuilder`]

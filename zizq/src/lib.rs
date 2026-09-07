@@ -139,7 +139,8 @@ mod worker;
 
 pub use batch::BatchConfig;
 pub use budget::{
-    Budget, BudgetBinding, BudgetBindingInput, BudgetChange, BudgetPolicy, BudgetStrategy,
+    Budget, BudgetBinding, BudgetBindingInput, BudgetChange, BudgetPatch, BudgetPolicy,
+    BudgetStrategy,
 };
 pub use bulk_enqueue::BulkEnqueueBuilder;
 pub use client::{Client, ClientBuilder};

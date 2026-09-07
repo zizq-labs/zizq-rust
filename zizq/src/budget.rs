@@ -19,6 +19,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::job_patch::Field;
+
 /// How a budget's tokens are managed.
 ///
 /// The two strategies answer different questions. `WhileInFlight` caps
@@ -213,6 +215,12 @@ pub struct Budget {
     pub updated_at: u64,
 }
 
+/// Envelope for `GET /budgets`.
+#[derive(Deserialize)]
+pub(crate) struct ListBudgetsResponse {
+    pub(crate) budgets: Vec<Budget>,
+}
+
 /// One budget a job draws on, as reported by the server.
 ///
 /// Distinct from [`BudgetBindingInput`] because the two are not the
@@ -321,6 +329,134 @@ impl From<String> for BudgetBindingInput {
             key: Cow::Owned(key),
             cost: None,
             create_with: None,
+        }
+    }
+}
+
+/// Changes to apply to an existing budget's policy.
+///
+/// A JSON Merge Patch, so a field no setter touched is left unchanged
+/// on the server and a freshly constructed `BudgetPatch` changes
+/// nothing. See the [`job_patch`](crate::JobPatch) module docs for the
+/// keep / clear / set model this shares.
+///
+/// ```
+/// use std::time::Duration;
+/// use zizq::{BudgetPatch, BudgetStrategy};
+///
+/// // Cap the spike without restating the rate.
+/// let tighten = BudgetPatch::new().burst(500);
+///
+/// // Let it spike again, up to the full allocation.
+/// let loosen = BudgetPatch::new().clear_burst();
+///
+/// // Change the policy wholesale.
+/// let swap = BudgetPatch::new()
+///     .allocation(20_000)
+///     .strategy(BudgetStrategy::time_based(Duration::from_secs(3600)));
+/// ```
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BudgetPatch {
+    /// New allocation. The server forbids a null allocation — a budget
+    /// without one is not a budget — so this is only ever keep or set.
+    #[serde(skip_serializing_if = "Field::is_keep")]
+    allocation: Field<u32>,
+
+    /// Strategy changes, itself a sub-field merge patch.
+    #[serde(skip_serializing_if = "Field::is_keep")]
+    strategy: Field<StrategyPatch>,
+}
+
+/// A merge patch over a budget's strategy. Built through
+/// [`BudgetPatch`]'s setters rather than directly, so that the
+/// combinations the server rejects cannot be assembled.
+#[derive(Debug, Clone, Default, Serialize)]
+struct StrategyPatch {
+    #[serde(rename = "type", skip_serializing_if = "Field::is_keep")]
+    kind: Field<String>,
+
+    #[serde(skip_serializing_if = "Field::is_keep")]
+    duration_ms: Field<u64>,
+
+    #[serde(skip_serializing_if = "Field::is_keep")]
+    burst: Field<u32>,
+}
+
+impl BudgetPatch {
+    /// A patch that changes nothing. Chain setters to fill it in.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of tokens the pool holds when full.
+    pub fn allocation(mut self, allocation: u32) -> Self {
+        self.allocation = Field::Set(allocation);
+        self
+    }
+
+    /// Replace the strategy outright.
+    ///
+    /// Every field the new strategy implies is stated, so the result is
+    /// exactly the strategy given rather than a merge with whatever was
+    /// there before. In particular a [`TimeBased`] with no burst clears
+    /// the stored one instead of inheriting it.
+    ///
+    /// [`TimeBased`]: BudgetStrategy::TimeBased
+    pub fn strategy(mut self, strategy: BudgetStrategy) -> Self {
+        self.strategy = Field::Set(match strategy {
+            BudgetStrategy::TimeBased { duration, burst } => StrategyPatch {
+                kind: Field::Set("time_based".into()),
+                duration_ms: Field::Set(duration.as_millis() as u64),
+                burst: match burst {
+                    Some(burst) => Field::Set(burst),
+                    None => Field::Clear,
+                },
+            },
+            // Neither a period nor a burst is emitted: the server
+            // rejects either alongside a switch to `while_in_flight`,
+            // and drops the stored ones itself.
+            BudgetStrategy::WhileInFlight => StrategyPatch {
+                kind: Field::Set("while_in_flight".into()),
+                ..StrategyPatch::default()
+            },
+            BudgetStrategy::Unknown { kind } => StrategyPatch {
+                kind: Field::Set(kind),
+                ..StrategyPatch::default()
+            },
+        });
+        self
+    }
+
+    /// Set the period over which the allocation replenishes, leaving
+    /// the rest of the strategy alone.
+    pub fn duration(mut self, duration: Duration) -> Self {
+        self.strategy_mut().duration_ms = Field::Set(duration.as_millis() as u64);
+        self
+    }
+
+    /// Cap how full the pool may get, leaving the rest of the strategy
+    /// alone.
+    pub fn burst(mut self, burst: u32) -> Self {
+        self.strategy_mut().burst = Field::Set(burst);
+        self
+    }
+
+    /// Clear the burst ceiling back to the allocation.
+    pub fn clear_burst(mut self) -> Self {
+        self.strategy_mut().burst = Field::Clear;
+        self
+    }
+
+    /// The nested strategy patch, promoted from keep to set on first
+    /// use so that a setter for one strategy field does not have to
+    /// restate the others.
+    fn strategy_mut(&mut self) -> &mut StrategyPatch {
+        if self.strategy.is_keep() {
+            self.strategy = Field::Set(StrategyPatch::default());
+        }
+        match &mut self.strategy {
+            Field::Set(strategy) => strategy,
+            _ => unreachable!("strategy was just promoted to Field::Set"),
         }
     }
 }

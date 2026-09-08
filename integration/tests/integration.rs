@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Notify;
 use zizq::{
-    jq_contains, jq_eq, BatchConfig, Client, CronEntry, JobKind, JobPatch, Router, UniqueKey,
-    Worker, ZizqError,
+    jq_contains, jq_eq, BatchConfig, BudgetBindingInput, BudgetPatch, BudgetPolicy, BudgetStrategy,
+    Client, CronEntry, JobKind, JobPatch, Router, UniqueKey, Worker, ZizqError,
 };
 
 /// A job kind carrying an arbitrary JSON payload. The macro stamps
@@ -949,5 +949,548 @@ async fn derive_batch_folds_by_only_fields() {
             "tenant_id": 7,
             "events": [{ "id": 1 }, { "id": 2 }, { "id": 3 }],
         })),
+    );
+}
+
+// --- Budgets (Pro) ---
+//
+// Every budget call is gated behind a Pro license on the server — on a
+// free-tier server it returns 403, in which case we skip the rest of
+// the scenario (mirroring the batched-job suites above).
+
+job_kind!(Throttled, "throttled");
+
+/// A job type declaring its budget as a per-type default, including
+/// the policy to create it with. Exercises `#[zizq(budget(...))]` and
+/// `JobKind::BUDGETS` against a real server.
+#[derive(Serialize, Deserialize, JobKind)]
+#[zizq(
+    name = "declared_budget",
+    queue = "integration",
+    budget(key = "declared", cost = 2, create_with(allocation = 10, while_in_flight))
+)]
+struct DeclaredBudget {
+    index: u64,
+}
+
+/// Create a budget, returning `None` when the server has no Pro
+/// license so the caller can skip.
+async fn budget_or_skip(
+    client: &Client,
+    key: &str,
+    policy: BudgetPolicy,
+) -> Option<zizq::Budget> {
+    match client.create_budget(key, policy).await {
+        Ok(budget) => Some(budget),
+        Err(e) if e.is_forbidden() => None,
+        Err(e) => panic!("create_budget failed: {e:?}"),
+    }
+}
+
+#[tokio::test]
+async fn budget_crud_round_trip() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::time_based(Duration::from_secs(60)));
+    let Some(created) = budget_or_skip(&client, "crud", policy).await else {
+        return;
+    };
+
+    assert_eq!(created.key, "crud");
+    assert_eq!(created.allocation, 100);
+    assert_eq!(
+        created.strategy,
+        BudgetStrategy::time_based(Duration::from_secs(60))
+    );
+
+    let fetched = client.get_budget("crud").await.expect("get_budget");
+    assert_eq!(fetched, created);
+
+    let listed = client.list_budgets().await.expect("list_budgets");
+    assert!(listed.iter().any(|b| b.key == "crud"));
+
+    // A merge patch touches one field within the strategy and leaves
+    // the period alone.
+    let patched = client
+        .update_budget("crud", BudgetPatch::new().burst(5))
+        .await
+        .expect("update_budget");
+    assert_eq!(
+        patched.strategy,
+        BudgetStrategy::TimeBased {
+            duration: Duration::from_secs(60),
+            burst: Some(5),
+        }
+    );
+
+    // `burst` is the one field with a meaningful null.
+    let cleared = client
+        .update_budget("crud", BudgetPatch::new().clear_burst())
+        .await
+        .expect("clear burst");
+    assert_eq!(
+        cleared.strategy,
+        BudgetStrategy::time_based(Duration::from_secs(60))
+    );
+
+    // A replace changes the policy, not the budget's identity.
+    let replaced = client
+        .put_budget("crud", BudgetPolicy::new(5, BudgetStrategy::WhileInFlight))
+        .await
+        .expect("put_budget");
+    assert_eq!(replaced.strategy, BudgetStrategy::WhileInFlight);
+    assert_eq!(replaced.allocation, 5);
+    assert_eq!(
+        replaced.created_at, created.created_at,
+        "a replace must not re-create the budget"
+    );
+
+    client.delete_budget("crud").await.expect("delete_budget");
+
+    let err = client.get_budget("crud").await.unwrap_err();
+    assert!(err.is_not_found(), "unexpected error: {err}");
+}
+
+// The behaviour that lets every instance of an application declare its
+// budgets on boot without coordinating.
+#[tokio::test]
+async fn creating_an_existing_budget_conflicts_and_leaves_it_alone() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "declare-race", policy).await else {
+        return;
+    };
+
+    let err = client
+        .create_budget(
+            "declare-race",
+            BudgetPolicy::new(1, BudgetStrategy::WhileInFlight),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.is_conflict(), "unexpected error: {err}");
+
+    let stored = client.get_budget("declare-race").await.expect("get_budget");
+    assert_eq!(
+        stored.allocation, 100,
+        "the losing declaration must not retune the budget"
+    );
+}
+
+#[tokio::test]
+async fn enqueue_binds_a_job_and_reports_it_back() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "bound", policy).await else {
+        return;
+    };
+
+    let job = client
+        .enqueue(Throttled(json!({ "n": 1 })))
+        .budget(BudgetBindingInput::new("bound").cost(2))
+        .await
+        .expect("enqueue");
+
+    assert_eq!(job.budgets.len(), 1);
+    assert_eq!(job.budgets[0].key, "bound");
+    assert_eq!(job.budgets[0].cost, 2);
+
+    // And it survives a round trip through a read.
+    let fetched = client.get_job(&job.id).await.expect("get_job");
+    assert_eq!(fetched.budgets, job.budgets);
+}
+
+// One call creates the budget and the job together, so an application
+// never needs a separate startup step.
+#[tokio::test]
+async fn a_binding_creates_its_budget_atomically() {
+    let client = fresh().await;
+
+    let job = match client
+        .enqueue(Throttled(json!({ "n": 1 })))
+        .budget(BudgetBindingInput::new("made-on-demand").create_with(BudgetPolicy::new(
+            7,
+            BudgetStrategy::WhileInFlight,
+        )))
+        .await
+    {
+        Ok(job) => job,
+        Err(e) if e.is_forbidden() => return,
+        Err(e) => panic!("enqueue failed: {e:?}"),
+    };
+
+    assert_eq!(job.budgets[0].key, "made-on-demand");
+
+    let budget = client
+        .get_budget("made-on-demand")
+        .await
+        .expect("budget was created by the enqueue");
+    assert_eq!(budget.allocation, 7);
+    assert_eq!(budget.strategy, BudgetStrategy::WhileInFlight);
+}
+
+// An existing budget's policy stays authoritative, so an enqueue can
+// never quietly retune one.
+#[tokio::test]
+async fn create_with_is_ignored_when_the_budget_exists() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "already-there", policy).await else {
+        return;
+    };
+
+    client
+        .enqueue(Throttled(json!({ "n": 1 })))
+        .budget(
+            BudgetBindingInput::new("already-there")
+                .create_with(BudgetPolicy::new(1, BudgetStrategy::WhileInFlight)),
+        )
+        .await
+        .expect("enqueue");
+
+    let stored = client.get_budget("already-there").await.expect("get_budget");
+    assert_eq!(stored.allocation, 100);
+}
+
+#[tokio::test]
+async fn a_derived_budget_default_applies_without_a_call_site_binding() {
+    let client = fresh().await;
+
+    let job = match client.enqueue(DeclaredBudget { index: 1 }).await {
+        Ok(job) => job,
+        Err(e) if e.is_forbidden() => return,
+        Err(e) => panic!("enqueue failed: {e:?}"),
+    };
+
+    assert_eq!(job.budgets.len(), 1);
+    assert_eq!(job.budgets[0].key, "declared");
+    assert_eq!(job.budgets[0].cost, 2);
+
+    // The `create_with` in the attribute made the budget too.
+    let budget = client.get_budget("declared").await.expect("get_budget");
+    assert_eq!(budget.allocation, 10);
+
+    // And the call site can opt out of it entirely.
+    let unthrottled = client
+        .enqueue(DeclaredBudget { index: 2 })
+        .clear_budgets()
+        .await
+        .expect("enqueue unthrottled");
+    assert!(unthrottled.budgets.is_empty());
+}
+
+#[tokio::test]
+async fn budgets_key_selects_what_is_bound() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "searchable", policy).await else {
+        return;
+    };
+
+    client
+        .enqueue(Throttled(json!({ "n": 1 })))
+        .budget("searchable")
+        .await
+        .expect("bound enqueue");
+    client
+        .enqueue(Throttled(json!({ "n": 2 })))
+        .await
+        .expect("unbound enqueue");
+
+    let count = client
+        .count_jobs()
+        .budgets_key(["searchable"])
+        .await
+        .expect("count_jobs");
+    assert_eq!(count, 1);
+
+    let page = client
+        .list_jobs()
+        .budgets_key(["searchable"])
+        .await
+        .expect("list_jobs");
+    assert_eq!(page.jobs.len(), 1);
+    assert_eq!(page.jobs[0].budgets[0].key, "searchable");
+}
+
+#[tokio::test]
+async fn single_job_bindings_can_be_changed_after_enqueue() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "rebind-a", policy).await else {
+        return;
+    };
+    client
+        .create_budget(
+            "rebind-b",
+            BudgetPolicy::new(100, BudgetStrategy::WhileInFlight),
+        )
+        .await
+        .expect("second budget");
+
+    let job = client
+        .enqueue(Throttled(json!({ "n": 1 })))
+        .await
+        .expect("enqueue");
+    assert!(job.budgets.is_empty());
+
+    let bound = client
+        .bind_budget(&job.id, BudgetBindingInput::new("rebind-a").cost(2))
+        .await
+        .expect("bind_budget");
+    assert_eq!(bound.budgets[0].cost, 2);
+
+    // Binding the same budget twice is a conflict...
+    let err = client
+        .bind_budget(&job.id, "rebind-a")
+        .await
+        .unwrap_err();
+    assert!(err.is_conflict(), "unexpected error: {err}");
+
+    // ...but rebinding replaces it.
+    let rebound = client
+        .rebind_budget(&job.id, BudgetBindingInput::new("rebind-a").cost(3))
+        .await
+        .expect("rebind_budget");
+    assert_eq!(rebound.budgets[0].cost, 3);
+
+    let recost = client
+        .set_budget_cost(&job.id, "rebind-a", 5)
+        .await
+        .expect("set_budget_cost");
+    assert_eq!(recost.budgets[0].cost, 5);
+
+    let replaced = client
+        .replace_budgets(
+            &job.id,
+            [
+                BudgetBindingInput::new("rebind-a").cost(1),
+                BudgetBindingInput::new("rebind-b").cost(4),
+            ],
+        )
+        .await
+        .expect("replace_budgets");
+    let mut keys: Vec<_> = replaced.budgets.iter().map(|b| b.key.as_str()).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["rebind-a", "rebind-b"]);
+
+    let unbound = client
+        .unbind_budget(&job.id, "rebind-a")
+        .await
+        .expect("unbind_budget");
+    assert_eq!(unbound.budgets.len(), 1);
+    assert_eq!(unbound.budgets[0].key, "rebind-b");
+
+    let cleared = client
+        .unbind_all_budgets(&job.id)
+        .await
+        .expect("unbind_all_budgets");
+    assert!(cleared.budgets.is_empty());
+}
+
+// The sequence that drains a budget so it can be deleted — a budget
+// cannot be removed while anything still draws on it.
+#[tokio::test]
+async fn bulk_rebinding_drains_a_budget_so_it_can_be_deleted() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "drain", policy).await else {
+        return;
+    };
+
+    for n in 0..3 {
+        client
+            .enqueue(Throttled(json!({ "n": n })))
+            .queue("drain-integration")
+            .await
+            .expect("enqueue");
+    }
+
+    let bound = client
+        .bind_all_jobs_budget(BudgetBindingInput::new("drain").cost(2))
+        .queue(["drain-integration"])
+        .await
+        .expect("bind_all_jobs_budget");
+    assert_eq!(bound.changed, 3);
+    assert!(bound.blocked.is_empty());
+
+    // A bound budget cannot be deleted.
+    let err = client.delete_budget("drain").await.unwrap_err();
+    assert!(err.is_conflict(), "unexpected error: {err}");
+
+    let recost = client
+        .set_all_jobs_budget_cost("drain", 4)
+        .budgets_key(["drain"])
+        .await
+        .expect("set_all_jobs_budget_cost");
+    assert_eq!(recost.changed, 3);
+
+    let unbound = client
+        .unbind_all_jobs_budget("drain")
+        .budgets_key(["drain"])
+        .await
+        .expect("unbind_all_jobs_budget");
+    assert_eq!(unbound.changed, 3);
+
+    assert_eq!(
+        client
+            .count_jobs()
+            .budgets_key(["drain"])
+            .await
+            .expect("count_jobs"),
+        0
+    );
+
+    // Now that nothing draws on it, it goes.
+    client.delete_budget("drain").await.expect("delete_budget");
+}
+
+#[tokio::test]
+async fn clearing_every_binding_leaves_jobs_unthrottled() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(100, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "clear-me", policy).await else {
+        return;
+    };
+
+    for n in 0..2 {
+        client
+            .enqueue(Throttled(json!({ "n": n })))
+            .queue("clear-integration")
+            .budget("clear-me")
+            .await
+            .expect("enqueue");
+    }
+
+    let change = client
+        .clear_all_jobs_budgets()
+        .queue(["clear-integration"])
+        .await
+        .expect("clear_all_jobs_budgets");
+    assert_eq!(change.changed, 2);
+
+    assert_eq!(
+        client
+            .count_jobs()
+            .budgets_key(["clear-me"])
+            .await
+            .expect("count_jobs"),
+        0
+    );
+}
+
+// The point of the whole feature: the server refuses to dispatch more
+// than the allocation permits, and the worker never learns that it
+// waited. With an allocation of 1 and a cost of 1, no two of these can
+// be in flight at once however much concurrency the worker offers.
+#[tokio::test]
+async fn a_while_in_flight_budget_caps_concurrency_server_side() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(1, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "one-at-a-time", policy).await else {
+        return;
+    };
+
+    let count: u64 = 4;
+    for n in 0..count {
+        client
+            .enqueue(Throttled(json!({ "n": n })))
+            .queue("throttle-integration")
+            .budget("one-at-a-time")
+            .await
+            .expect("enqueue");
+    }
+
+    let in_flight = Arc::new(Mutex::new(0u32));
+    let peak = Arc::new(Mutex::new(0u32));
+    let done = Arc::new(Mutex::new(0u64));
+    let shutdown = Arc::new(Notify::new());
+
+    let worker = Worker::builder()
+        .client(client.clone())
+        .concurrency(4)
+        .queues(vec!["throttle-integration"])
+        .handler(Router::new().route({
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
+            let done = done.clone();
+            let shutdown = shutdown.clone();
+            move |_job: Throttled| {
+                let in_flight = in_flight.clone();
+                let peak = peak.clone();
+                let done = done.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    {
+                        let mut current = in_flight.lock().unwrap();
+                        *current += 1;
+                        let mut peak = peak.lock().unwrap();
+                        *peak = (*peak).max(*current);
+                    }
+
+                    // Hold the token long enough that a server ignoring
+                    // the budget would hand out the rest of the batch.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+
+                    *in_flight.lock().unwrap() -= 1;
+
+                    let mut done = done.lock().unwrap();
+                    *done += 1;
+                    if *done == count {
+                        shutdown.notify_one();
+                    }
+                    Ok::<(), Infallible>(())
+                }
+            }
+        }))
+        .build()
+        .expect("build worker");
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        worker.run(async move { shutdown.notified().await }),
+    )
+    .await
+    .expect("worker run timed out")
+    .expect("worker run");
+
+    assert_eq!(*done.lock().unwrap(), count, "every job should still run");
+    assert_eq!(
+        *peak.lock().unwrap(),
+        1,
+        "the budget allows only one in flight at a time",
+    );
+}
+
+// Tokens are debited before dispatch, so a budget with none to give
+// parks its jobs indefinitely rather than handing them to a worker.
+#[tokio::test]
+async fn an_exhausted_budget_parks_jobs_rather_than_dispatching_them() {
+    let client = fresh().await;
+
+    let policy = BudgetPolicy::new(1, BudgetStrategy::WhileInFlight);
+    let Some(_) = budget_or_skip(&client, "parked", policy).await else {
+        return;
+    };
+
+    // Cost 2 against an allocation of 1 would strand the job forever,
+    // so the server refuses the binding outright.
+    let err = client
+        .enqueue(Throttled(json!({ "n": 1 })))
+        .queue("parked-integration")
+        .budget(BudgetBindingInput::new("parked").cost(2))
+        .await
+        .unwrap_err();
+    assert!(
+        err.is_invalid_request(),
+        "a cost larger than the capacity must be refused: {err}"
     );
 }

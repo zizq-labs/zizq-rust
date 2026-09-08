@@ -229,7 +229,7 @@ mod tests {
         let query = url.query().unwrap();
         assert!(query.contains("status=ready"));
         assert!(query.contains("queue=billing"));
-        assert!(query.contains("budgets_key=emails"));
+        assert!(query.contains("budgets.key=emails"));
     }
 
     #[test]

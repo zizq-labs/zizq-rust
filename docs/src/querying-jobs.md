@@ -43,10 +43,13 @@ for a single `JobPage`:
 > # Ok(()) }
 > ```
 
-Filters (`status`, `queue`, `job_type`, `id`, a `filter` jq expression, and
-the `priority` / `ready_at` / `attempts` range filters described
-[below](#filtering-by-range)) combine with AND. The same filter set is
-shared by `count_jobs`, `delete_all_jobs`, and `patch_all_jobs`.
+Filters (`status`, `queue`, `job_type`, `id`, `budgets_key`, a `filter` jq
+expression, and the `priority` / `ready_at` / `attempts` range filters
+described [below](#filtering-by-range)) combine with AND. The same filter set
+is shared by `count_jobs`, `delete_all_jobs`, and `patch_all_jobs`.
+
+`budgets_key` selects jobs drawing on a named budget — see
+[Concurrency & Rate Limiting](./budgets.md).
 
 ### Streaming every match
 

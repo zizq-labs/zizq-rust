@@ -38,6 +38,11 @@ use to enqueue that job directly:
 > `.ready_at()`, or `.run_at()` on the enqueue builder you pass to
 > `CronEntry::new`.
 
+Everything else the builder carries rides along, so an entry can bind its jobs
+to a budget or batch them exactly as a direct enqueue would — see
+[Concurrency & Rate Limiting](./budgets.md) and
+[Batched Jobs](./batched-jobs.md).
+
 ## Replacing a group
 
 `Client::replace_cron` atomically installs a group's entire entry set. Chain

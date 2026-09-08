@@ -1,8 +1,61 @@
 # Changelog
 
-## 0.7.0 (Unreleased)
+## 0.7.0
 
 ### Added
+
+- **Budgets** — server-side rate limiting and concurrency limiting,
+  gated behind a Zizq Pro license on the server. A budget is a named
+  pool of tokens; a job binds to one or more of them with a cost, and
+  the server will not dispatch it until it can debit that cost from
+  every budget it draws on.
+
+  The throttling happens before a worker ever sees the job. Workers
+  stay naive — no waiting, no sleeping, no re-queueing something that
+  arrived too early. A job that cannot yet pay is parked in the queue
+  and dispatched the moment its budgets allow, while everything else
+  keeps flowing past it.
+
+      use std::time::Duration;
+      use zizq::{BudgetPolicy, BudgetStrategy, JobKind};
+
+      // At most 3 of these run at once. Typically done once at startup.
+      client
+          .create_budget("stripe", BudgetPolicy::new(3, BudgetStrategy::WhileInFlight))
+          .await?;
+
+      // At most 10,000 an hour, never more than 500 at once.
+      client
+          .create_budget(
+              "image-service",
+              BudgetPolicy::new(
+                  10_000,
+                  BudgetStrategy::TimeBased {
+                      duration: Duration::from_secs(3600),
+                      burst: Some(500),
+                  },
+              ),
+          )
+          .await?;
+
+      #[derive(serde::Serialize, serde::Deserialize, JobKind)]
+      #[zizq(
+          name = "charge_card",
+          queue = "billing",
+          budget(key = "stripe", cost = 2),
+          budget(key = "notifications", create_with(allocation = 3, while_in_flight)),
+      )]
+      struct ChargeCard {
+          invoice_id: String,
+      }
+
+      client.enqueue(ChargeCard { invoice_id }).await?;
+
+  Needs Zizq 0.7.0 or newer on the server, with a Pro license — without
+  one the server responds `403`, which surfaces as
+  `ZizqError::is_forbidden`.
+
+  See https://zizq.io/docs/clients/rust/budgets.html for full details.
 
 - **A group-level cron timezone.** `ReplaceCronBuilder::timezone`
   sets an IANA timezone on the whole schedule, applied to every entry

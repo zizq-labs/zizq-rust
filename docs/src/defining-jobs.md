@@ -106,6 +106,15 @@ call site (see [Enqueuing Jobs](./enqueuing-jobs.md)).
                 falls through to the server default.
             </td>
         </tr>
+        <tr>
+            <td><code>budget(key = "...", cost = ..., create_with(...))</code></td>
+            <td>
+                A budget every job of this type draws on, throttling its
+                dispatch server-side. Repeat the attribute to bind several.
+                Requires a pro license on the server — see
+                <a href="./budgets.md">Concurrency &amp; Rate Limiting</a>.
+            </td>
+        </tr>
     </tbody>
 </table>
 

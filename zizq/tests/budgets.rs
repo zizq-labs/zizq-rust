@@ -206,13 +206,18 @@ async fn delete_budget_sends_no_body_and_accepts_no_content() {
     assert!(req.body.is_empty());
 }
 
+// A budget cannot go while anything still draws on it, and the
+// server calls that a conflict rather than a bad request.
 #[tokio::test]
-async fn delete_budget_surfaces_a_bound_job_as_unprocessable() {
+async fn delete_budget_surfaces_a_bound_job_as_a_conflict() {
     let server = MockServer::start().await;
     server
         .set_response_json(
-            422,
-            json!({ "error": "budget 'emails' still has 3 jobs bound" }),
+            409,
+            json!({
+                "error": "budget 'emails' is referenced by 3 unfinished jobs. Delete them or \
+                          wait for them to finish before deleting it."
+            }),
         )
         .await;
 
@@ -221,7 +226,7 @@ async fn delete_budget_surfaces_a_bound_job_as_unprocessable() {
         .await
         .unwrap_err();
 
-    assert!(err.is_invalid_request());
+    assert!(err.is_conflict());
     assert!(!err.is_retryable());
 }
 
@@ -945,7 +950,7 @@ async fn bulk_unbind_selects_by_the_budget_being_removed() {
     let req = server.last_request().await;
     assert_eq!(req.method, "DELETE");
     assert!(req.path.starts_with("/jobs/budgets/emails?"));
-    assert!(req.path.contains("budgets_key=emails"));
+    assert!(req.path.contains("budgets.key=emails"));
 }
 
 #[tokio::test]
@@ -1003,7 +1008,7 @@ async fn budgets_key_filters_a_listing() {
 
     let req = server.last_request().await;
     assert!(req.path.starts_with("/jobs?"));
-    assert!(req.path.contains("budgets_key=emails%2Cstripe"));
+    assert!(req.path.contains("budgets.key=emails%2Cstripe"));
 }
 
 #[tokio::test]
@@ -1022,7 +1027,7 @@ async fn budgets_key_filters_a_count() {
         .last_request()
         .await
         .path
-        .contains("budgets_key=emails"));
+        .contains("budgets.key=emails"));
 }
 
 // An empty `budgets_key` is the likeliest empty filter here — it is

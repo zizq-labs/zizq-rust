@@ -808,8 +808,8 @@ impl Client {
 
     /// Delete a budget.
     ///
-    /// The server refuses while any job is still bound to it, with
-    /// `status: 422`.
+    /// The server refuses while any unfinished job still draws on it,
+    /// with `status: 409` — see [`ZizqError::is_conflict`].
     pub async fn delete_budget(&self, key: &str) -> Result<(), ZizqError> {
         let url = self.url(&["budgets", key]);
         let response = self.send(reqwest::Method::DELETE, url, None).await?;

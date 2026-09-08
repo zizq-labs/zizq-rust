@@ -118,7 +118,9 @@ impl JobFilter {
             q.append_pair("id", &id.join(","));
         }
         if let Some(budgets_key) = self.budgets_key.as_ref().filter(|v| !v.is_empty()) {
-            q.append_pair("budgets_key", &budgets_key.join(","));
+            // Dotted on the wire to mirror the `budgets` array on a
+            // job; `budgets_key` here is only the Rust setter's name.
+            q.append_pair("budgets.key", &budgets_key.join(","));
         }
         if let Some(jq) = &self.jq {
             q.append_pair("filter", jq);

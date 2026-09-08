@@ -17,7 +17,8 @@ use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
 use crate::attrs::{
-    BatchAttr, BatchFoldMode, BatchKeyConfig, UniqueAttr, UniqueScopeAttr, UniqueSelection,
+    BatchAttr, BatchFoldMode, BatchKeyConfig, BudgetStrategyAttr, UniqueAttr, UniqueScopeAttr,
+    UniqueSelection,
 };
 
 mod attrs;
@@ -55,6 +56,14 @@ mod jq_path;
 ///   minus the batch path, prefixed with the type name).
 ///   `except = [...]` inside `key` is *additive* — the batch path
 ///   is always excluded regardless.
+/// - `#[zizq(budget(key = "...", [cost = <expr>],
+///   [create_with(allocation = <expr>, <strategy>)]))]` — adds one
+///   entry to `JobKind::BUDGETS`. Repeat the attribute to bind a job
+///   to several budgets; only `key` is required. `<strategy>` is
+///   either the bare `while_in_flight` or
+///   `time_based(duration_ms = <expr>, [burst = <expr>])`. A
+///   `create_with` policy is applied only if the budget does not
+///   already exist, so it is safe on every enqueue.
 #[proc_macro_derive(JobKind, attributes(zizq))]
 pub fn derive_job_kind(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -131,6 +140,41 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
         }
     });
 
+    let budgets_const = (!attrs.budgets.is_empty()).then(|| {
+        let entries = attrs.budgets.iter().map(|budget| {
+            let key = &budget.key;
+            let cost = match &budget.cost {
+                Some(cost) => quote! { ::core::option::Option::Some(#cost) },
+                None => quote! { ::core::option::Option::None },
+            };
+            let create_with = match &budget.create_with {
+                Some(policy) => {
+                    let allocation = &policy.allocation;
+                    let strategy = emit_budget_strategy(&policy.strategy);
+                    quote! {
+                        ::core::option::Option::Some(
+                            ::zizq::BudgetPolicy::new(#allocation, #strategy)
+                        )
+                    }
+                }
+                None => quote! { ::core::option::Option::None },
+            };
+            // Written as a struct literal rather than through the
+            // `const fn` builders: `create_with` can't be `const`,
+            // since overwriting the field would drop the old value.
+            quote! {
+                ::zizq::BudgetBindingInput {
+                    key: ::std::borrow::Cow::Borrowed(#key),
+                    cost: #cost,
+                    create_with: #create_with,
+                }
+            }
+        });
+        quote! {
+            const BUDGETS: &'static [::zizq::BudgetBindingInput] = &[ #(#entries),* ];
+        }
+    });
+
     Ok(quote! {
         impl #impl_generics ::zizq::JobKind for #ty #ty_generics #where_clause {
             const NAME: &'static str = #name_expr;
@@ -139,10 +183,34 @@ fn derive_job_kind_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenSt
             #retry_limit_const
             #backoff_const
             #retention_const
+            #budgets_const
             #unique_key_fn
             #batch_fn
         }
     })
+}
+
+/// Emit a [`zizq::BudgetStrategy`] expression from a parsed strategy
+/// attribute.
+///
+/// `Duration::from_millis` is a `const fn`, so the result is usable in
+/// the `BUDGETS` const.
+fn emit_budget_strategy(strategy: &BudgetStrategyAttr) -> proc_macro2::TokenStream {
+    match strategy {
+        BudgetStrategyAttr::WhileInFlight => quote! { ::zizq::BudgetStrategy::WhileInFlight },
+        BudgetStrategyAttr::TimeBased { duration_ms, burst } => {
+            let burst = match burst {
+                Some(burst) => quote! { ::core::option::Option::Some(#burst) },
+                None => quote! { ::core::option::Option::None },
+            };
+            quote! {
+                ::zizq::BudgetStrategy::TimeBased {
+                    duration: ::core::time::Duration::from_millis(#duration_ms),
+                    burst: #burst,
+                }
+            }
+        }
+    }
 }
 
 /// Emit the `fn unique_key(&self) -> Option<UniqueKey>` body from a

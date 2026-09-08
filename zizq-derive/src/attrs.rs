@@ -64,6 +64,55 @@ pub(crate) struct ZizqAttrs {
     /// key(only = [...] | except = [...], prefix = false)))]` — emits
     /// a [`JobKind::batch`] implementation.
     pub batch: Option<BatchAttr>,
+
+    /// One entry per `#[zizq(budget(key = "...", cost = <expr>,
+    /// create_with(...)))]` — together they become
+    /// [`JobKind::BUDGETS`]. Unlike the others this accumulates:
+    /// a job may draw on several budgets, so repeating the attribute
+    /// is how you say so.
+    pub budgets: Vec<BudgetAttr>,
+}
+
+/// Parsed contents of one `#[zizq(budget(...))]`. Only `key` is
+/// required — a binding with no cost debits the server's default of
+/// `1`, and one with no policy expects its budget to exist already.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct BudgetAttr {
+    pub key: LitStr,
+    pub cost: Option<Expr>,
+    pub create_with: Option<BudgetPolicyAttr>,
+}
+
+/// Parsed contents of `create_with(allocation = <expr>, <strategy>)`.
+/// Both parts are required: a policy without either is not a policy.
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct BudgetPolicyAttr {
+    pub allocation: Expr,
+    pub strategy: BudgetStrategyAttr,
+}
+
+/// The strategy inside a `create_with(...)`, named the same way the
+/// wire format does.
+///
+/// `duration_ms` follows the `_ms` convention the other numeric
+/// attributes use (`base_ms`, `completed_ms`), even though the
+/// emitted code builds a [`Duration`](core::time::Duration) — an
+/// attribute has no way to write one.
+// `TimeBased` is far larger than the unit `WhileInFlight`, but this
+// enum is built a handful of times per compilation and never stored,
+// so boxing a `syn::Expr` to even them out would cost more in noise
+// than it saves in bytes.
+#[allow(clippy::large_enum_variant)]
+#[cfg_attr(test, derive(Debug))]
+pub(crate) enum BudgetStrategyAttr {
+    /// `while_in_flight` — a bare path, taking no fields.
+    WhileInFlight,
+
+    /// `time_based(duration_ms = <expr>, burst = <expr>)`.
+    TimeBased {
+        duration_ms: Expr,
+        burst: Option<Expr>,
+    },
 }
 
 /// Parsed contents of `#[zizq(unique(...))]`. All fields are
@@ -237,6 +286,22 @@ impl ZizqAttrs {
                         }
                         attrs.retention = Some(parse_retention(&meta)?);
                     }
+                    "budget" => {
+                        let budget = parse_budget(&meta)?;
+                        if let Some(dup) = attrs
+                            .budgets
+                            .iter()
+                            .find(|b| b.key.value() == budget.key.value())
+                        {
+                            // The server would reject this too, but a
+                            // compile error beats a 422 at runtime.
+                            return Err(syn::Error::new(
+                                budget.key.span(),
+                                format!("duplicate `budget` key `{}`", dup.key.value()),
+                            ));
+                        }
+                        attrs.budgets.push(budget);
+                    }
                     "unique" => {
                         if attrs.unique.is_some() {
                             return Err(meta.error("duplicate `unique` attribute"));
@@ -357,6 +422,147 @@ fn parse_retention(meta: &syn::meta::ParseNestedMeta) -> syn::Result<RetentionAt
         completed_ms,
         dead_ms,
     })
+}
+
+/// Parse the `(key = "...", cost = ..., create_with(...))` body of a
+/// `#[zizq(budget(...))]` attribute.
+fn parse_budget(meta: &syn::meta::ParseNestedMeta) -> syn::Result<BudgetAttr> {
+    let mut key: Option<LitStr> = None;
+    let mut cost: Option<Expr> = None;
+    let mut create_with: Option<BudgetPolicyAttr> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "key" => {
+                if key.is_some() {
+                    return Err(inner.error("duplicate `key` field"));
+                }
+                key = Some(inner.value()?.parse::<LitStr>()?);
+            }
+            "cost" => {
+                if cost.is_some() {
+                    return Err(inner.error("duplicate `cost` field"));
+                }
+                cost = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "create_with" => {
+                if create_with.is_some() {
+                    return Err(inner.error("duplicate `create_with` field"));
+                }
+                create_with = Some(parse_budget_policy(&inner)?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `budget` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    let Some(key) = key else {
+        return Err(meta.error("`budget(...)` requires `key = \"...\"`"));
+    };
+
+    Ok(BudgetAttr {
+        key,
+        cost,
+        create_with,
+    })
+}
+
+/// Parse the `(allocation = ..., <strategy>)` body of a
+/// `create_with(...)`.
+///
+/// Exactly one strategy must be named. Leaving it out would mean
+/// inventing one, and naming two is a contradiction.
+fn parse_budget_policy(meta: &syn::meta::ParseNestedMeta) -> syn::Result<BudgetPolicyAttr> {
+    let mut allocation: Option<Expr> = None;
+    let mut strategy: Option<BudgetStrategyAttr> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        let name = ident.to_string();
+        match name.as_str() {
+            "allocation" => {
+                if allocation.is_some() {
+                    return Err(inner.error("duplicate `allocation` field"));
+                }
+                allocation = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "while_in_flight" | "time_based" => {
+                if strategy.is_some() {
+                    return Err(inner.error("`create_with(...)` names more than one strategy"));
+                }
+                strategy = Some(if name == "while_in_flight" {
+                    // A bare path; a parenthesised body would be
+                    // fields this strategy has nowhere to put.
+                    if inner.input.peek(syn::token::Paren) {
+                        return Err(inner.error(
+                            "`while_in_flight` takes no fields — its tokens return on \
+                             acknowledgement, not on a clock",
+                        ));
+                    }
+                    BudgetStrategyAttr::WhileInFlight
+                } else {
+                    parse_time_based(&inner)?
+                });
+            }
+            other => {
+                return Err(inner.error(format!("unknown `create_with` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    let Some(allocation) = allocation else {
+        return Err(meta.error("`create_with(...)` requires `allocation = ...`"));
+    };
+
+    let Some(strategy) = strategy else {
+        return Err(meta.error(
+            "`create_with(...)` requires a strategy — `while_in_flight` or `time_based(...)`",
+        ));
+    };
+
+    Ok(BudgetPolicyAttr {
+        allocation,
+        strategy,
+    })
+}
+
+/// Parse the `(duration_ms = ..., burst = ...)` body of a
+/// `time_based(...)` strategy.
+fn parse_time_based(meta: &syn::meta::ParseNestedMeta) -> syn::Result<BudgetStrategyAttr> {
+    let mut duration_ms: Option<Expr> = None;
+    let mut burst: Option<Expr> = None;
+
+    meta.parse_nested_meta(|inner| {
+        let ident = inner.path.require_ident()?;
+        match ident.to_string().as_str() {
+            "duration_ms" => {
+                if duration_ms.is_some() {
+                    return Err(inner.error("duplicate `duration_ms` field"));
+                }
+                duration_ms = Some(inner.value()?.parse::<Expr>()?);
+            }
+            "burst" => {
+                if burst.is_some() {
+                    return Err(inner.error("duplicate `burst` field"));
+                }
+                burst = Some(inner.value()?.parse::<Expr>()?);
+            }
+            other => {
+                return Err(inner.error(format!("unknown `time_based` field `{other}`")));
+            }
+        }
+        Ok(())
+    })?;
+
+    let Some(duration_ms) = duration_ms else {
+        return Err(meta.error("`time_based(...)` requires `duration_ms = ...`"));
+    };
+
+    Ok(BudgetStrategyAttr::TimeBased { duration_ms, burst })
 }
 
 /// Parse the `(only = [...], except = [...], scope = "...", prefix = ...)`
@@ -1164,6 +1370,136 @@ mod tests {
         assert!(
             err.to_string().contains("duplicate `batch`"),
             "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn parses_a_bare_budget_key() {
+        let attrs = parse_str(r#"#[zizq(budget(key = "emails"))] struct Foo;"#).unwrap();
+        assert_eq!(attrs.budgets.len(), 1);
+        assert_eq!(attrs.budgets[0].key.value(), "emails");
+        assert!(attrs.budgets[0].cost.is_none());
+        assert!(attrs.budgets[0].create_with.is_none());
+    }
+
+    #[test]
+    fn budget_attributes_accumulate_rather_than_conflict() {
+        let attrs = parse_str(
+            r#"#[zizq(budget(key = "a"))] #[zizq(budget(key = "b", cost = 2))] struct Foo;"#,
+        )
+        .unwrap();
+        assert_eq!(attrs.budgets.len(), 2);
+        assert_eq!(attrs.budgets[0].key.value(), "a");
+        assert_eq!(attrs.budgets[1].key.value(), "b");
+    }
+
+    #[test]
+    fn parses_a_while_in_flight_policy() {
+        let attrs = parse_str(
+            r#"#[zizq(budget(key = "a", create_with(allocation = 3, while_in_flight)))] struct Foo;"#,
+        )
+        .unwrap();
+        let policy = attrs.budgets[0].create_with.as_ref().unwrap();
+        assert!(matches!(policy.strategy, BudgetStrategyAttr::WhileInFlight));
+    }
+
+    #[test]
+    fn parses_a_time_based_policy() {
+        let attrs = parse_str(
+            r#"#[zizq(budget(key = "a", create_with(allocation = 9, time_based(duration_ms = 60000, burst = 5))))] struct Foo;"#,
+        )
+        .unwrap();
+        let policy = attrs.budgets[0].create_with.as_ref().unwrap();
+        assert!(matches!(
+            policy.strategy,
+            BudgetStrategyAttr::TimeBased { burst: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn budget_requires_a_key() {
+        let err = parse_str(r#"#[zizq(budget(cost = 2))] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requires `key"), "unexpected error: {msg}");
+    }
+
+    // The server rejects a duplicate key too, but failing here points
+    // at the offending literal instead of at a 422 in production.
+    #[test]
+    fn duplicate_budget_keys_are_rejected() {
+        let err =
+            parse_str(r#"#[zizq(budget(key = "a"), budget(key = "a"))] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate"), "unexpected error: {msg}");
+        assert!(msg.contains("`a`"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn unknown_budget_fields_are_rejected() {
+        let err = parse_str(r#"#[zizq(budget(key = "a", weight = 2))] struct Foo;"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown"), "unexpected error: {msg}");
+        assert!(msg.contains("`weight`"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn create_with_requires_an_allocation() {
+        let err =
+            parse_str(r#"#[zizq(budget(key = "a", create_with(while_in_flight)))] struct Foo;"#)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("requires `allocation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn create_with_requires_a_strategy() {
+        let err =
+            parse_str(r#"#[zizq(budget(key = "a", create_with(allocation = 3)))] struct Foo;"#)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("requires a strategy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn naming_two_strategies_is_rejected() {
+        let err = parse_str(
+            r#"#[zizq(budget(key = "a", create_with(allocation = 3, while_in_flight, time_based(duration_ms = 1))))] struct Foo;"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("more than one strategy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // A duration on a `while_in_flight` budget reads as if it set a
+    // refill period, and the server refuses it. Catching it here says
+    // so at the point it was written.
+    #[test]
+    fn while_in_flight_rejects_a_parenthesised_body() {
+        let err = parse_str(
+            r#"#[zizq(budget(key = "a", create_with(allocation = 3, while_in_flight(duration_ms = 60000))))] struct Foo;"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("takes no fields"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn time_based_requires_a_duration() {
+        let err = parse_str(
+            r#"#[zizq(budget(key = "a", create_with(allocation = 3, time_based(burst = 5))))] struct Foo;"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("requires `duration_ms"),
+            "unexpected error: {err}"
         );
     }
 }

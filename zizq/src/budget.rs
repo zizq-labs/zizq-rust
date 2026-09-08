@@ -215,6 +215,47 @@ pub struct Budget {
     pub updated_at: u64,
 }
 
+/// Body for the per-binding job endpoints
+/// (`/jobs/{id}/budgets/{key}` and the bulk `/jobs/budgets/{key}`).
+///
+/// The key travels in the path, so it is deliberately absent here —
+/// sending it in the body as well would be a second, contradictable
+/// source of truth.
+#[derive(Serialize)]
+pub(crate) struct BindingBody<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cost: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) create_with: Option<&'a BudgetPolicy>,
+}
+
+impl<'a> From<&'a BudgetBindingInput> for BindingBody<'a> {
+    fn from(binding: &'a BudgetBindingInput) -> Self {
+        Self {
+            cost: binding.cost,
+            create_with: binding.create_with.as_ref(),
+        }
+    }
+}
+
+/// Body for `PATCH /jobs/{id}/budgets/{key}`, which changes only the
+/// cost. Required rather than optional: a patch naming no field at all
+/// would be a request to change nothing.
+#[derive(Serialize)]
+pub(crate) struct CostBody {
+    pub(crate) cost: u32,
+}
+
+/// Body for `PUT /jobs/{id}/budgets`, which replaces the whole set.
+///
+/// Here the key *is* carried per binding — there is no path segment to
+/// take it from.
+#[derive(Serialize)]
+pub(crate) struct BudgetsBody {
+    pub(crate) budgets: Vec<BudgetBindingInput>,
+}
+
 /// Envelope for `GET /budgets`.
 #[derive(Deserialize)]
 pub(crate) struct ListBudgetsResponse {

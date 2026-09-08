@@ -690,3 +690,373 @@ async fn a_cron_entry_carries_its_jobs_budgets() {
         ])
     );
 }
+
+// --- Rebinding an enqueued job ----------------------------------------------
+
+#[tokio::test]
+async fn bind_budget_puts_the_key_in_the_path_not_the_body() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .bind_budget("job-1", BudgetBindingInput::new("emails").cost(2))
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "POST");
+    assert_eq!(req.path, "/jobs/job-1/budgets/emails");
+    // The key is in the path; repeating it here would be a second,
+    // contradictable source of truth.
+    assert_eq!(body_of(&server).await, json!({ "cost": 2 }));
+}
+
+#[tokio::test]
+async fn bind_budget_can_create_the_budget_atomically() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    let policy = BudgetPolicy::new(3, BudgetStrategy::WhileInFlight);
+    json_client(&server.url)
+        .bind_budget(
+            "job-1",
+            BudgetBindingInput::new("stripe").create_with(policy),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_of(&server).await,
+        json!({
+            "create_with": {
+                "allocation": 3,
+                "strategy": { "type": "while_in_flight" },
+            },
+        })
+    );
+}
+
+#[tokio::test]
+async fn binding_a_job_twice_is_a_conflict() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(409, json!({ "error": "job already draws on 'emails'" }))
+        .await;
+
+    let err = json_client(&server.url)
+        .bind_budget("job-1", "emails")
+        .await
+        .unwrap_err();
+
+    assert!(err.is_conflict());
+}
+
+#[tokio::test]
+async fn rebind_budget_replaces_the_binding_whole() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .rebind_budget("job-1", BudgetBindingInput::new("emails").cost(5))
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "PUT");
+    assert_eq!(req.path, "/jobs/job-1/budgets/emails");
+    assert_eq!(body_of(&server).await, json!({ "cost": 5 }));
+}
+
+#[tokio::test]
+async fn set_budget_cost_patches_only_the_cost() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .set_budget_cost("job-1", "emails", 7)
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "PATCH");
+    assert_eq!(req.path, "/jobs/job-1/budgets/emails");
+    assert_eq!(body_of(&server).await, json!({ "cost": 7 }));
+}
+
+#[tokio::test]
+async fn unbind_budget_targets_one_binding() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .unbind_budget("job-1", "emails")
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "DELETE");
+    assert_eq!(req.path, "/jobs/job-1/budgets/emails");
+    assert!(req.body.is_empty());
+}
+
+#[tokio::test]
+async fn unbind_all_budgets_targets_the_collection() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .unbind_all_budgets("job-1")
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "DELETE");
+    assert_eq!(req.path, "/jobs/job-1/budgets");
+}
+
+// Here the key *is* carried per binding — there is no path segment to
+// take it from, so dropping it would silently bind nothing.
+#[tokio::test]
+async fn replace_budgets_sends_each_key_in_the_body() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .replace_budgets(
+            "job-1",
+            [
+                BudgetBindingInput::new("emails").cost(2),
+                BudgetBindingInput::new("stripe"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "PUT");
+    assert_eq!(req.path, "/jobs/job-1/budgets");
+    assert_eq!(
+        body_of(&server).await,
+        json!({ "budgets": [{ "key": "emails", "cost": 2 }, { "key": "stripe" }] })
+    );
+}
+
+#[tokio::test]
+async fn replacing_with_nothing_sends_an_empty_list() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, job_response()).await;
+
+    json_client(&server.url)
+        .replace_budgets("job-1", Vec::<BudgetBindingInput>::new())
+        .await
+        .unwrap();
+
+    assert_eq!(body_of(&server).await, json!({ "budgets": [] }));
+}
+
+#[tokio::test]
+async fn rebinding_an_in_flight_job_is_refused() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(
+            422,
+            json!({ "error": "job 'job-1' is InFlight — only queued jobs may have their budgets changed" }),
+        )
+        .await;
+
+    let err = json_client(&server.url)
+        .unbind_budget("job-1", "emails")
+        .await
+        .unwrap_err();
+
+    assert!(err.is_invalid_request());
+}
+
+// --- Bulk rebinding ---------------------------------------------------------
+
+fn change_json() -> serde_json::Value {
+    json!({ "changed": 12, "blocked": ["01K9", "01KA"] })
+}
+
+#[tokio::test]
+async fn bulk_bind_reports_what_changed_and_what_was_in_flight() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    let change = json_client(&server.url)
+        .bind_all_jobs_budget(BudgetBindingInput::new("stripe").cost(2))
+        .queue(["billing"])
+        .await
+        .unwrap();
+
+    assert_eq!(change.changed, 12);
+    assert_eq!(change.blocked, ["01K9", "01KA"]);
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "POST");
+    assert!(req.path.starts_with("/jobs/budgets/stripe?"));
+    assert!(req.path.contains("queue=billing"));
+    assert_eq!(body_of(&server).await, json!({ "cost": 2 }));
+}
+
+#[tokio::test]
+async fn bulk_rebind_uses_put() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    json_client(&server.url)
+        .rebind_all_jobs_budget("stripe")
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "PUT");
+    assert_eq!(req.path, "/jobs/budgets/stripe");
+}
+
+#[tokio::test]
+async fn bulk_set_cost_patches_the_named_budget() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    json_client(&server.url)
+        .set_all_jobs_budget_cost("stripe", 4)
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "PATCH");
+    assert_eq!(req.path, "/jobs/budgets/stripe");
+    assert_eq!(body_of(&server).await, json!({ "cost": 4 }));
+}
+
+// The sequence that empties a budget so it can be deleted.
+#[tokio::test]
+async fn bulk_unbind_selects_by_the_budget_being_removed() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    json_client(&server.url)
+        .unbind_all_jobs_budget("emails")
+        .budgets_key(["emails"])
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "DELETE");
+    assert!(req.path.starts_with("/jobs/budgets/emails?"));
+    assert!(req.path.contains("budgets_key=emails"));
+}
+
+#[tokio::test]
+async fn bulk_clear_names_no_budget() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    json_client(&server.url)
+        .clear_all_jobs_budgets()
+        .queue(["emails"])
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert_eq!(req.method, "DELETE");
+    assert!(req.path.starts_with("/jobs/budgets?"));
+    assert!(req.path.contains("queue=emails"));
+}
+
+// An empty filter must not become a change-everything request.
+#[tokio::test]
+async fn an_empty_filter_changes_nothing_without_a_request() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    let change = json_client(&server.url)
+        .clear_all_jobs_budgets()
+        .queue(Vec::<String>::new())
+        .await
+        .unwrap();
+
+    assert_eq!(change.changed, 0);
+    assert!(change.blocked.is_empty());
+    assert!(server.requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn budgets_key_filters_a_listing() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(
+            200,
+            json!({
+                "jobs": [],
+                "pages": { "self": "/jobs", "next": null, "prev": null },
+            }),
+        )
+        .await;
+
+    json_client(&server.url)
+        .list_jobs()
+        .budgets_key(["emails", "stripe"])
+        .await
+        .unwrap();
+
+    let req = server.last_request().await;
+    assert!(req.path.starts_with("/jobs?"));
+    assert!(req.path.contains("budgets_key=emails%2Cstripe"));
+}
+
+#[tokio::test]
+async fn budgets_key_filters_a_count() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, json!({ "count": 3 })).await;
+
+    let count = json_client(&server.url)
+        .count_jobs()
+        .budgets_key(["emails"])
+        .await
+        .unwrap();
+
+    assert_eq!(count, 3);
+    assert!(server
+        .last_request()
+        .await
+        .path
+        .contains("budgets_key=emails"));
+}
+
+// An empty `budgets_key` is the likeliest empty filter here — it is
+// what you get from `budgets_key(keys_to_drain)` when that list turns
+// out to be empty. Treated as "no filter" it would unbind every job on
+// the server.
+#[tokio::test]
+async fn an_empty_budgets_key_filter_changes_nothing() {
+    let server = MockServer::start().await;
+    server.set_response_json(200, change_json()).await;
+
+    let change = json_client(&server.url)
+        .clear_all_jobs_budgets()
+        .budgets_key(Vec::<String>::new())
+        .await
+        .unwrap();
+
+    assert_eq!(change.changed, 0);
+    assert!(server.requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn an_empty_budgets_key_filter_deletes_nothing() {
+    let server = MockServer::start().await;
+    server
+        .set_response_json(200, json!({ "deleted": 99 }))
+        .await;
+
+    let deleted = json_client(&server.url)
+        .delete_all_jobs()
+        .budgets_key(Vec::<String>::new())
+        .await
+        .unwrap();
+
+    assert_eq!(deleted, 0);
+    assert!(server.requests().await.is_empty());
+}

@@ -48,6 +48,7 @@ pub(crate) struct JobFilter {
     pub(crate) priority: Option<RangeFilter<u16>>,
     pub(crate) ready_at: Option<RangeFilter<OffsetDateTime>>,
     pub(crate) attempts: Option<RangeFilter<u32>>,
+    pub(crate) budgets_key: Option<Vec<String>>,
 }
 
 /// True when `opt` is `Some` and the contained list is empty.
@@ -71,6 +72,7 @@ impl JobFilter {
             || is_explicitly_empty(&self.queue)
             || is_explicitly_empty(&self.job_type)
             || is_explicitly_empty(&self.id)
+            || is_explicitly_empty(&self.budgets_key)
     }
 
     /// True if at least one filter contributes a query parameter.
@@ -83,6 +85,7 @@ impl JobFilter {
             || is_present(&self.queue)
             || is_present(&self.job_type)
             || is_present(&self.id)
+            || is_present(&self.budgets_key)
             || self.jq.is_some()
             || self.priority.is_some()
             || self.ready_at.is_some()
@@ -113,6 +116,9 @@ impl JobFilter {
         }
         if let Some(id) = self.id.as_ref().filter(|v| !v.is_empty()) {
             q.append_pair("id", &id.join(","));
+        }
+        if let Some(budgets_key) = self.budgets_key.as_ref().filter(|v| !v.is_empty()) {
+            q.append_pair("budgets_key", &budgets_key.join(","));
         }
         if let Some(jq) = &self.jq {
             q.append_pair("filter", jq);
@@ -188,6 +194,21 @@ macro_rules! job_filter_setters {
             S: Into<String>,
         {
             self.filters.id = Some(ids.into_iter().map(Into::into).collect());
+            self
+        }
+
+        /// Filter by the key of a budget the job draws on.
+        ///
+        /// Works anywhere jobs are filtered.
+        ///
+        /// Passing an empty iterator means "match no budgets" — see
+        /// [`Self::status`] for the empty-set semantics.
+        pub fn budgets_key<I, S>(mut self, keys: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            self.filters.budgets_key = Some(keys.into_iter().map(Into::into).collect());
             self
         }
 

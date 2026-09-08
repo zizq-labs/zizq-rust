@@ -10,8 +10,13 @@
 
 #![cfg(feature = "derive")]
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
-use zizq::{BackoffConfig, BatchConfig, JobKind, RetentionConfig, UniqueKey, UniqueScope};
+use zizq::{
+    BackoffConfig, BatchConfig, BudgetPolicy, BudgetStrategy, JobKind, RetentionConfig, UniqueKey,
+    UniqueScope,
+};
 
 #[test]
 fn defaults_come_from_the_trait_when_no_attrs_are_set() {
@@ -444,4 +449,131 @@ fn batch_limit_accepts_arithmetic_expressions() {
         "expected when to embed 100, got {}",
         cfg.when,
     );
+}
+
+#[test]
+fn no_budget_attribute_leaves_the_list_empty() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    struct SendEmail {
+        _to: String,
+    }
+    assert!(SendEmail::BUDGETS.is_empty());
+}
+
+#[test]
+fn budget_attribute_binds_by_key_alone() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(budget(key = "emails"))]
+    struct SendEmail {
+        _to: String,
+    }
+
+    assert_eq!(SendEmail::BUDGETS.len(), 1);
+    assert_eq!(SendEmail::BUDGETS[0].key, "emails");
+    assert_eq!(SendEmail::BUDGETS[0].cost, None);
+    assert_eq!(SendEmail::BUDGETS[0].create_with, None);
+}
+
+// A job may draw on several budgets, so the attribute accumulates
+// rather than replacing — unlike every other `#[zizq(...)]` key.
+#[test]
+fn repeated_budget_attributes_accumulate_in_order() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(budget(key = "emails", cost = 2))]
+    #[zizq(budget(key = "stripe"))]
+    struct SendEmail {
+        _to: String,
+    }
+
+    assert_eq!(SendEmail::BUDGETS.len(), 2);
+    assert_eq!(SendEmail::BUDGETS[0].key, "emails");
+    assert_eq!(SendEmail::BUDGETS[0].cost, Some(2));
+    assert_eq!(SendEmail::BUDGETS[1].key, "stripe");
+}
+
+#[test]
+fn several_budgets_can_share_one_attribute() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(name = "charge_card", budget(key = "stripe"), budget(key = "audit"))]
+    struct ChargeCard {
+        _invoice_id: String,
+    }
+
+    assert_eq!(ChargeCard::NAME, "charge_card");
+    assert_eq!(ChargeCard::BUDGETS.len(), 2);
+}
+
+#[test]
+fn create_with_builds_a_while_in_flight_policy() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(budget(key = "stripe", create_with(allocation = 3, while_in_flight)))]
+    struct ChargeCard {
+        _invoice_id: String,
+    }
+
+    assert_eq!(
+        ChargeCard::BUDGETS[0].create_with,
+        Some(BudgetPolicy::new(3, BudgetStrategy::WhileInFlight))
+    );
+}
+
+// `duration_ms` follows the `_ms` convention of the other numeric
+// attributes, and const arithmetic is allowed just as it is there.
+#[test]
+fn create_with_builds_a_time_based_policy_from_milliseconds() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(budget(
+        key = "image-service",
+        cost = 2,
+        create_with(allocation = 10_000, time_based(duration_ms = 60 * 60 * 1000, burst = 500))
+    ))]
+    struct ResizeImage {
+        _url: String,
+    }
+
+    assert_eq!(ResizeImage::BUDGETS[0].cost, Some(2));
+    assert_eq!(
+        ResizeImage::BUDGETS[0].create_with,
+        Some(BudgetPolicy::new(
+            10_000,
+            BudgetStrategy::TimeBased {
+                duration: Duration::from_secs(3600),
+                burst: Some(500),
+            }
+        ))
+    );
+}
+
+#[test]
+fn a_time_based_policy_may_omit_the_burst() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(budget(
+        key = "image-service",
+        create_with(allocation = 100, time_based(duration_ms = 60_000))
+    ))]
+    struct ResizeImage {
+        _url: String,
+    }
+
+    assert_eq!(
+        ResizeImage::BUDGETS[0].create_with,
+        Some(BudgetPolicy::new(
+            100,
+            BudgetStrategy::time_based(Duration::from_secs(60))
+        ))
+    );
+}
+
+// The derived const has to be usable everywhere a hand-written one is,
+// which means it must survive const evaluation.
+#[test]
+fn the_derived_list_is_a_genuine_const() {
+    #[derive(Serialize, Deserialize, JobKind)]
+    #[zizq(budget(key = "stripe", cost = 2, create_with(allocation = 3, while_in_flight)))]
+    struct ChargeCard {
+        _invoice_id: String,
+    }
+
+    const BUDGETS: &[zizq::BudgetBindingInput] = ChargeCard::BUDGETS;
+    assert_eq!(BUDGETS.len(), 1);
 }

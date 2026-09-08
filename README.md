@@ -54,6 +54,8 @@ zizq = { version = "0.6", default-features = false, features = ["native-tls", "d
 - Single-job enqueue via a builder that resolves trait
       defaults and per-call overrides
 - Bulk enqueue — many jobs submitted in a single request
+- Unique (aka deduplicated) jobs
+- Batched (aka merged/folded) jobs
 - `Worker` — long-running consumer with bounded concurrency,
       auto-reconnect, batched acks, retry-aware nack, and graceful
       shutdown
@@ -72,6 +74,7 @@ zizq = { version = "0.6", default-features = false, features = ["native-tls", "d
 - Cron scheduling: `list_crons`, `get_cron`, `replace_cron`,
       `delete_cron`, per-group and per-entry pause/resume, and
       single-entry CRUD (`add`/`get`/`put`/`delete_cron_entry`)
+- Job concurrency and rate limits via token budgets
 
 ## Sample Usage
 

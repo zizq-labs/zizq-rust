@@ -104,6 +104,14 @@ constant, then to the server default.
                 <a href="./batched-jobs.md">Batched Jobs</a>.
             </td>
         </tr>
+        <tr>
+            <td><code>budget</code> / <code>budgets</code> / <code>clear_budgets</code></td>
+            <td>
+                Bind this job to one or more budgets, so the server throttles
+                its dispatch — see
+                <a href="./budgets.md">Concurrency &amp; Rate Limiting</a>.
+            </td>
+        </tr>
     </tbody>
 </table>
 
